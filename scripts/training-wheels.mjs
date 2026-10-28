@@ -41,6 +41,11 @@ const unreadable = (what) => block('cannot-read', what,
   "the guard can't read safely what it would run, so it doesn't run",
   'run the git command itself, on one line, written out in full: no wrappers, variables, escapes or wildcards');
 
+/** Setting a variable that changes what git does. @param {string} name */
+const gitVariable = (name) => block('cannot-read', `setting ${name}`,
+  "a GIT_ variable, or one that names a program git runs, changes what git does where the guard can't see it",
+  'run git without it; the settings a first pull request needs go through git config');
+
 /** A git command that isn't on the list. @param {string} what */
 const offList = (what) => block('not-on-list', what,
   "it isn't on the training-wheels list of what a first pull request needs",
@@ -207,6 +212,27 @@ const MENTIONS_GIT = /g[^a-z0-9]*i[^a-z0-9]*t/i;
 // The one redirection kept: duplicating one numbered stream onto another (2>&1, >&2). It names no file
 // and takes no word, so removing it changes nothing git sees.
 const FD_DUP = /(^|\s)\d?[<>]&(\d|-)(?=\s|$|;|&&|\|\|)/g;
+// Words that open or continue a compound command (if ...; then ...; fi, for or while ...; do ...; done), in
+// bash or PowerShell. In a git line they would put git behind a word the guard reads as a program.
+const SHELL_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'elseif', 'fi', 'do', 'done', 'while', 'until', 'for', 'foreach',
+  'select', 'case', 'esac', 'switch', 'coproc', 'function', 'filter', 'try', 'catch', 'finally', '!']);
+
+/** The line with everything inside quotes blanked, so a pattern sees only what the shell reads as syntax. @param {string} line */
+function outsideQuotes(line) {
+  /** @type {string | null} */
+  let quote = null;
+  let out = '';
+  for (const c of line) {
+    if (quote) {
+      if (c === quote) quote = null;
+      out += ' ';
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      out += ' ';
+    } else out += c;
+  }
+  return out;
+}
 
 /**
  * The first of these characters that appears outside quotes in a line, or null.
@@ -224,18 +250,23 @@ function unquoted(line, chars) {
   return null;
 }
 
+/** A redirection in a git line: > and >> write what git prints over a file. */
+const redirected = () => block('cannot-read', 'a redirection in a git line',
+  'a > or < in a git line can write what git prints over a file, uncommitted changes and all',
+  'run the git command without redirecting it, and read what it prints');
+
 /**
- * Refusals on the raw text of a line that mentions git, before any parsing: redirections that can
- * take a word with them, backslashes, and line breaks.
+ * Refusals on the raw text of a line that mentions git, before any parsing: any redirection but the
+ * stream duplication 2>&1, backslashes, and line breaks.
  * @param {string} line
- * @returns {string | null} why, or null
+ * @returns {Block | null}
  */
 function rawRefusal(line) {
   if (!MENTIONS_GIT.test(line)) return null;
   const rest = line.replace(FD_DUP, '$1');
-  if (/>&|<&|&>|\|&/.test(rest)) return 'a redirection in a git line';
-  if (line.includes('\\')) return 'a backslash in a git line';
-  if (/[\r\n]/.test(line)) return 'a line break in a git line';
+  if (/>&|<&|&>|\|&/.test(rest) || /[<>]/.test(outsideQuotes(rest))) return redirected();
+  if (line.includes('\\')) return unreadable('a backslash in a git line');
+  if (/[\r\n]/.test(line)) return unreadable('a line break in a git line');
   return null;
 }
 
@@ -574,7 +605,11 @@ const ALLOWED = {
     const w = walk(rest, { shortValue: 'mF', shortFlags: 'lan', longValue: ['--message', '--file'], longFlags: ['--list', '--annotate'] });
     return w.off ?? (w.positional.length > 2 ? 'tag with these arguments' : null);
   },
-  reflog: (rest) => (rest.length === 0 || rest[0] === 'show' ? null : `reflog ${rest[0]}`),
+  // Reading only: the log options (never --output), and no expire or delete.
+  reflog: (rest) => {
+    if (rest.length && rest[0] !== 'show' && !rest[0].startsWith('-')) return `reflog ${rest[0]}`;
+    return walk(rest[0] === 'show' ? rest.slice(1) : rest, READ_ONLY.log).off;
+  },
   init: (rest) => offWalk(rest, { shortValue: 'b', shortFlags: 'q', longValue: ['--initial-branch'], longFlags: ['--quiet'] }),
   clone: (rest) => {
     const w = walk(rest, { shortValue: 'b', shortFlags: 'q', longValue: ['--branch', '--depth'], longFlags: ['--quiet', '--single-branch', '--no-single-branch'] });
@@ -666,13 +701,15 @@ function stripWrappers(w) {
 
 /**
  * The verdict on one simple command.
- * @param {Word[]} command @param {Required<Context>} ctx
+ * @param {Word[]} command @param {Required<Context>} ctx @param {boolean} gitLine whether the line mentions git
  * @returns {Block | null}
  */
-function checkCommand(command, ctx) {
+function checkCommand(command, ctx, gitLine) {
   let w = command;
   let assigned = false;
   while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0].text)) {
+    const name = w[0].text.split('=')[0];
+    if (/^GIT_/i.test(name) || (gitLine && RISKY_VARIABLE.test(name))) return gitVariable(name);
     w = w.slice(1);
     assigned = true;
   }
@@ -700,7 +737,7 @@ function checkCommand(command, ctx) {
   }
   if (stripped.wrapped) return unreadable(`${prog} after a wrapper`);
   if (REFUSED_PROGRAMS.has(prog)) return unreadable(prog);
-  if (prog === 'export' || prog === 'declare' || prog === 'typeset') {
+  if (['export', 'declare', 'typeset', 'readonly', 'local'].includes(prog)) {
     return texts.some((a) => RISKY_VARIABLE.test(a.split('=')[0])) ? unreadable(`${prog} ${texts.join(' ')}`) : null;
   }
   if (prog === 'find' && texts.some((a) => /^-(exec|execdir|ok|okdir)$/.test(a))) return unreadable('find -exec');
@@ -738,8 +775,9 @@ export function check(line, context = {}) {
     alias: context.alias ?? ((name) => gitOut(cwd, ['config', '--get', `alias.${name}`])),
   };
   const raw = rawRefusal(line);
-  if (raw) return unreadable(raw);
-  if (MENTIONS_GIT.test(line)) {
+  if (raw) return raw;
+  const gitLine = MENTIONS_GIT.test(line);
+  if (gitLine) {
     // PowerShell reads a family of non-ASCII look-alikes as quotes and dashes (curly and low quotes, en and
     // em dashes), so it and this reader could split or read the same line differently. Nothing a first pull
     // request needs is outside ASCII; a commit message in other characters is the one cost.
@@ -754,12 +792,23 @@ export function check(line, context = {}) {
       // PowerShell builds arguments from expressions: (subexpressions), @(arrays), a,b lists and @splats.
       const c = unquoted(line, '(,@');
       if (c) return unreadable(`a PowerShell ${c} in a git line`);
+      // A lone & is the call operator in front of a command, or a background job after one; && chains.
+      if (/(^|[^&])&(?!&)/.test(outsideQuotes(line.replace(FD_DUP, '$1')))) return unreadable("PowerShell's & in a git line");
     }
   }
   const { commands, why } = parse(line.replace(FD_DUP, '$1'), ctx.shell);
   if (why) return unreadable(why);
   for (const command of commands) {
-    const found = checkCommand(command, ctx);
+    const first = command[0].text;
+    if (gitLine) {
+      if (SHELL_KEYWORDS.has(first.toLowerCase())) return unreadable(`a shell keyword (${first}) in a git line`);
+      if (ctx.shell === 'powershell' && first === '.') return unreadable("PowerShell's dot-sourcing (.) in a git line");
+      const flags = command.slice(1).map((x) => x.text);
+      if (program(first) === 'set' && flags.some((f, k) => /^-[A-Za-z]*a/.test(f) || (f === '-o' && flags[k + 1] === 'allexport'))) {
+        return unreadable('set -a in a git line');
+      }
+    }
+    const found = checkCommand(command, ctx, gitLine);
     if (found) return found;
   }
   return null;

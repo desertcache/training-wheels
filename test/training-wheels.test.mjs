@@ -175,6 +175,49 @@ test('a git line with any character outside ASCII is refused in both shells', ()
   assert.equal(check('echo "caf\u00e9 hours" > notes.txt', ctx), null);
 });
 
+test('a git line with a shell keyword as a command word is refused', () => {
+  for (const c of ['if true; then git reset --hard; fi', 'if git status; then git branch -D feature; fi',
+    'for f in a; do git checkout -- notes.txt; done', 'while true; do git push --force origin main; break; done',
+    'until git pull; do git status; done', '! git status', 'coproc git reset --hard']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+  }
+  assert.equal(check('if true; then echo ok; fi', ctx), null);
+});
+
+test('a git line with a redirection is refused; 2>&1 and a quoted arrow are not redirections', () => {
+  for (const c of ['git show HEAD:notes.txt > notes.txt', 'git log >> notes.txt', 'git diff > fix.patch', 'git status >/dev/null',
+    'git commit -F - < msg.txt']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+  assert.equal(check('git status 2>&1', ctx), null);
+  assert.equal(check('git commit -m "Rename config -> settings"', ctx), null);
+});
+
+test('git reflog may only read: no --output, no expire or delete', () => {
+  for (const c of ['git reflog show --output=notes.txt', 'git reflog --output=notes.txt', 'git reflog show -o notes.txt', 'git reflog delete HEAD']) {
+    assert.equal(check(c, ctx)?.rule, 'not-on-list', c);
+  }
+  for (const c of ['git reflog', 'git reflog show', 'git reflog show -n 5 main', 'git reflog --oneline']) assert.equal(check(c, ctx), null, c);
+});
+
+test("PowerShell: a git line with the & call operator or . dot-sourcing is refused", () => {
+  for (const c of ['. git reset --hard', '. git status', '& git status', '&git push', 'git status &', '& "git" status']) {
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+  assert.equal(check('git add -A && git commit -m "x"', ps), null);
+});
+
+test('setting a GIT_ variable is refused in any line, and a program variable or set -a in a git line', () => {
+  for (const c of ['set -a; GIT_CONFIG_COUNT=1; GIT_CONFIG_KEY_0=remote.origin.push; GIT_CONFIG_VALUE_0=+refs/heads/main:refs/heads/main; git push origin',
+    'GIT_CONFIG_COUNT=1; git push', 'GIT_DIR=/tmp/x make', 'readonly GIT_DIR=/tmp/x', 'local GIT_WORK_TREE=.', 'PAGER=less; git log',
+    'set -a; git push', 'set -o allexport; git push']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+  }
+  assert.equal(check('$env:GIT_CONFIG_COUNT = 1; git push', ps)?.rule, 'cannot-read');
+  assert.equal(check('NAME=sam; echo $NAME', ctx), null);
+});
+
 test('splits commands at separators but never inside quotes', () => {
   assert.deepEqual(splitCommands('git add -A && git commit -m "a; b && c" | cat'), [['git', 'add', '-A'], ['git', 'commit', '-m', 'a; b && c'], ['cat']]);
   assert.deepEqual(splitCommands("echo 'it''s'; git status"), [['echo', 'its'], ['git', 'status']]);

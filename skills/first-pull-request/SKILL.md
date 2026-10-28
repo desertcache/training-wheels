@@ -63,5 +63,6 @@ it: a force push, a hard reset, a branch delete and a rebase are stopped on purp
 one can lose work for good or rewrite history other people already have. Only the git commands a
 first pull request needs are on its list; for anything else, it says to ask a reviewer, so say that
 to the person too. Run git commands plainly, one per line, without wrappers like `xargs`, `env` or
-`bash -c`, without shell variables or wildcards, without backslashes, and in plain ASCII: the guard
-refuses what it can't read.
+`bash -c`, without `if`, `for` or `while` around them, without redirecting their output (`>`, `<`,
+`2>/dev/null`), without shell variables or wildcards, without backslashes, and in plain ASCII: the
+guard refuses what it can't read.
