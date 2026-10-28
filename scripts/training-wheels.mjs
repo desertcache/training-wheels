@@ -209,6 +209,22 @@ const MENTIONS_GIT = /g[^a-z0-9]*i[^a-z0-9]*t/i;
 const FD_DUP = /(^|\s)\d?[<>]&(\d|-)(?=\s|$|;|&&|\|\|)/g;
 
 /**
+ * The first of these characters that appears outside quotes in a line, or null.
+ * @param {string} line @param {string} chars
+ */
+function unquoted(line, chars) {
+  /** @type {string | null} */
+  let quote = null;
+  for (const c of line) {
+    if (quote) {
+      if (c === quote) quote = null;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (chars.includes(c)) return c;
+  }
+  return null;
+}
+
+/**
  * Refusals on the raw text of a line that mentions git, before any parsing: redirections that can
  * take a word with them, backslashes, and line breaks.
  * @param {string} line
@@ -253,7 +269,7 @@ const PLAIN_PROGRAM = /^[A-Za-z0-9_.\/:\\-]+$/;
 const GIT_GLOBAL_VALUE = new Set(['-C', '-c']);
 const GIT_GLOBAL_FLAG = new Set(['--no-pager', '-P', '--version', '--help', '-v', '-h']);
 // Settings that can't make git run a program: the only ones -c or git config may set.
-const SAFE_CONFIG = /^(user\.(name|email)|color\.[a-z.]+|core\.(quotepath|autocrlf|safecrlf)|init\.defaultbranch|advice\.[a-z]+|push\.(default|autosetupremote)|pull\.(rebase|ff)|fetch\.prune)$/i;
+const SAFE_CONFIG = /^(user\.(name|email)|color\.[a-z.]+|core\.(quotepath|autocrlf|safecrlf)|init\.defaultbranch|advice\.[a-z]+|push\.(default|autosetupremote)|pull\.ff|fetch\.prune)$/i;
 
 /**
  * A subcommand's allowed options: short letters that take a value (attached, or the next word), short
@@ -430,10 +446,44 @@ function classic(sub, rest, ctx) {
   }
 }
 
-// Read-only subcommands: any of their options, except the few that write a file or start a program.
+// Read-only subcommands, each with the options it may use; any other option is off the list (so, for
+// example, diff --output, which overwrites a file, grep -O and ls-remote --upload-pack, which start a
+// program). An option that takes an optional value is listed as a flag: git only reads its value
+// when it's attached (--format=%h), so it never takes the next word.
+const DIGITS = '0123456789';
+/** @type {Record<string, Spec>} */
 const READ_ONLY = {
-  status: [], diff: ['--output'], log: ['--output'], show: ['--output'], blame: [], shortlog: [], 'ls-files': [], 'ls-remote': [],
-  'rev-parse': [], describe: [], grep: ['--open-files-in-pager'], help: [], version: [],
+  status: { shortFlags: 'sbvz', longFlags: ['--short', '--branch', '--porcelain', '--long', '--verbose', '--untracked-files', '--ignored',
+    '--show-stash', '--ahead-behind', '--no-ahead-behind', '--renames', '--no-renames', '--column', '--no-column', '--null'] },
+  diff: { shortValue: 'U', shortFlags: 'wbRpz', longValue: ['--unified', '--diff-filter'],
+    longFlags: ['--staged', '--cached', '--stat', '--numstat', '--shortstat', '--name-only', '--name-status', '--word-diff', '--color',
+      '--no-color', '--color-words', '--ignore-all-space', '--ignore-space-change', '--ignore-blank-lines', '--exit-code', '--quiet',
+      '--check', '--minimal', '--patience', '--histogram', '--patch', '--no-patch', '--summary', '--merge-base', '--relative'] },
+  log: { shortValue: 'nSG', shortFlags: `pi${DIGITS}`, longValue: ['--max-count', '--skip', '--since', '--after', '--until', '--before',
+    '--author', '--committer', '--grep', '--date'],
+  longFlags: ['--oneline', '--graph', '--decorate', '--no-decorate', '--all', '--branches', '--tags', '--remotes', '--stat', '--shortstat',
+    '--numstat', '--name-only', '--name-status', '--patch', '--no-patch', '--follow', '--reverse', '--first-parent', '--merges',
+    '--no-merges', '--abbrev-commit', '--format', '--pretty', '--color', '--no-color', '--left-right', '--word-diff', '--relative-date',
+    '--date-order', '--topo-order', '--regexp-ignore-case'] },
+  show: { shortValue: 'U', shortFlags: `psqw${DIGITS}`, longValue: ['--date'],
+    longFlags: ['--stat', '--shortstat', '--numstat', '--name-only', '--name-status', '--oneline', '--format', '--pretty', '--patch',
+      '--no-patch', '--abbrev-commit', '--color', '--no-color', '--word-diff', '--quiet', '--summary'] },
+  blame: { shortValue: 'L', shortFlags: 'wesl', longValue: ['--date'],
+    longFlags: ['--show-email', '--show-name', '--show-number', '--porcelain', '--line-porcelain', '--root', '--show-stats'] },
+  shortlog: { shortFlags: 'sne', longFlags: ['--summary', '--numbered', '--email', '--all', '--no-merges'] },
+  'ls-files': { shortFlags: 'mocdsuzt', longFlags: ['--modified', '--others', '--cached', '--deleted', '--stage', '--unmerged',
+    '--exclude-standard', '--full-name', '--error-unmatch', '--directory', '--no-empty-directory', '--eol'] },
+  'ls-remote': { shortFlags: 'qt', longValue: ['--sort'], longFlags: ['--heads', '--branches', '--tags', '--refs', '--quiet', '--get-url', '--symref'] },
+  'rev-parse': { shortFlags: 'q', longFlags: ['--show-toplevel', '--abbrev-ref', '--short', '--git-dir', '--git-common-dir',
+    '--is-inside-work-tree', '--is-inside-git-dir', '--verify', '--quiet', '--symbolic-full-name', '--show-prefix', '--show-cdup',
+    '--absolute-git-dir'] },
+  describe: { longFlags: ['--tags', '--all', '--always', '--abbrev', '--dirty', '--long', '--contains', '--exact-match', '--first-parent'] },
+  grep: { shortValue: 'eABC', shortFlags: `niwlLcvEFIhH${DIGITS}`, longValue: ['--max-depth', '--context', '--after-context', '--before-context'],
+    longFlags: ['--line-number', '--ignore-case', '--word-regexp', '--files-with-matches', '--files-without-match', '--count', '--invert-match',
+      '--extended-regexp', '--fixed-strings', '--basic-regexp', '--cached', '--untracked', '--break', '--heading', '--full-name',
+      '--only-matching', '--column', '--color', '--no-color', '--all-match', '--and', '--or', '--not'] },
+  help: { shortFlags: 'ag', longFlags: ['--all', '--guides'] },
+  version: { longFlags: ['--build-options'] },
 };
 
 /** @param {string[]} rest @param {Spec} spec */
@@ -570,9 +620,8 @@ function checkGit(argWords, ctx) {
   const found = classic(sub, rest, ctx);
   if (found) return found;
   if (Object.hasOwn(READ_ONLY, sub)) {
-    const banned = READ_ONLY[/** @type {keyof typeof READ_ONLY} */ (sub)];
-    if (hasLong(optsOf(rest), ...banned) || (sub === 'grep' && hasShort(optsOf(rest), 'O'))) return offList(`git ${sub} ${banned[0] ?? '-O'}`);
-    return null;
+    const off = walk(rest, READ_ONLY[sub]).off;
+    return off ? offList(`git ${sub} ${off}`) : null;
   }
   const allow = Object.hasOwn(ALLOWED, sub) ? ALLOWED[sub] : null;
   if (!allow) return offList(ctx.alias(sub) !== null ? `git ${sub} (an alias)` : `git ${sub}`);
@@ -690,6 +739,11 @@ export function check(line, context = {}) {
   };
   const raw = rawRefusal(line);
   if (raw) return unreadable(raw);
+  // PowerShell builds arguments from expressions: (subexpressions), @(arrays), a,b lists and @splats.
+  if (ctx.shell === 'powershell' && MENTIONS_GIT.test(line)) {
+    const c = unquoted(line, '(,@');
+    if (c) return unreadable(`a PowerShell ${c} in a git line`);
+  }
   const { commands, why } = parse(line.replace(FD_DUP, '$1'), ctx.shell);
   if (why) return unreadable(why);
   for (const command of commands) {

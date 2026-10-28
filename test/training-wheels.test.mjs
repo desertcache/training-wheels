@@ -85,6 +85,11 @@ const NOT_ON_LIST = [
   'git push --exec=x', 'git push --no-verify', 'git remote add evil https://x', 'git config core.editor vim', 'git config alias.yolo "push --force"',
   'git config --global alias.st status', 'git diff --output=src/app.js', 'git yolo', 'git co main', 'git lfs install', 'git --exec-path=/tmp status',
   'git --git-dir=x status', '/usr/lib/git-core/git-push --force', 'gh api -X DELETE repos/a/b',
+  // read-only commands use only their listed options
+  'git ls-remote --upload-pack=x origin', 'git ls-remote -u x origin', 'git diff --ext-diff', 'git diff --textconv', 'git log --output=x',
+  'git log --pretty --output=src/app.js', 'git show --output=x HEAD', 'git help --web commit', 'git status --porcelain --output=x',
+  // a setting that would make git pull rebase is not one git config may set
+  'git config pull.rebase true',
 ];
 
 // What the guard can't read exactly is refused, not parsed.
@@ -135,6 +140,15 @@ test('PowerShell: a backtick escapes, @ splats, and a computed command name is r
   }
   assert.equal(check('git push --force; Remove-Item x', ps)?.rule, 'force-push');
   assert.equal(check('Get-Content .\\README.md', ps), null);
+});
+
+test('PowerShell: a git line with an unquoted ( , or @ is refused, since those build arguments from expressions', () => {
+  for (const c of ['git push origin (Get-Branch)', "git push @('--force')", 'git push origin,--force', 'git log @args', '(git push --force)']) {
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+  for (const c of ['git log --format="%h, %s"', 'git commit -m "fix, polish (again)"', 'git status']) {
+    assert.equal(check(c, ps), null, c);
+  }
 });
 
 test('splits commands at separators but never inside quotes', () => {

@@ -32,25 +32,47 @@ guard on purpose. Two ways to do that:
 
 ## Allowed commands
 
-| Command | What's on the list |
+Each command may use only the options listed; any other option puts it off the list. Long options
+can be abbreviated, as git allows. `[no-]` means both forms.
+
+| Command | Allowed options and arguments |
 |---|---|
-| `git status`, `diff`, `log`, `show`, `blame`, `shortlog`, `ls-files`, `rev-parse`, `describe`, `grep`, `help`, `--version` | Read only, any options, except `--output` (it overwrites a file) and `grep -O` (it starts a program) |
-| `git add` | Paths, `-A`, `-u`, `-n`, `-N`, `-v` (not `-f`, which adds ignored files such as secrets) |
-| `git commit` | With a message: `-m` (one per paragraph), `-a`, `-F <file>` |
-| `git switch` | `<branch>`, or `-c <new-branch>` |
-| `git checkout` | `<branch>`, or `-b <new-branch>` |
-| `git branch` | Listing, `<new-branch>`, `-u <upstream>` |
-| `git restore --staged <file>` | Unstage a file; your changes stay |
-| `git reset` | `--soft` or `--mixed`, a commit or files: takes a commit back and keeps every change |
-| `git stash` | `push` (with `-m`, `-u`), `pop`, `apply`, `list`, `show` |
-| `git fetch`, `git pull` | A remote and branch; `--prune`, `--tags`, `--ff-only` |
-| `git push` | A remote and branch; `-u`, `--dry-run`, `--tags`, `--follow-tags` |
-| `git merge` | A branch; `--no-ff`, `--ff-only`, `-m`, `--abort`, `--continue` |
-| `git rm`, `git mv` | Files, without `--force` |
-| `git clean -n` | Lists what `clean -f` would delete |
-| `git rebase --abort` | Steps out of a rebase someone else started |
-| `git remote -v`, `git tag`, `git reflog`, `git init`, `git clone <url>` | As written; `tag` may create, not delete |
-| `git config` | Reading any setting; setting only names, email, colors and similar ones that can't start a program |
+| git's own, before the command | `-C <path>`, `-c <setting>` (only the settings `git config` may set, below), `--no-pager`, `-P`, `--version`, `--help` |
+| `git status` | `-s` `-b` `-v` `-z`, `--short`, `--branch`, `--porcelain`, `--long`, `--verbose`, `--untracked-files`, `--ignored`, `--show-stash`, `--[no-]ahead-behind`, `--[no-]renames`, `--[no-]column`, `--null`; paths |
+| `git diff` | `-U <n>`, `-w` `-b` `-R` `-p` `-z`, `--unified`, `--diff-filter`, `--staged`, `--cached`, `--stat`, `--numstat`, `--shortstat`, `--name-only`, `--name-status`, `--word-diff`, `--color-words`, `--[no-]color`, `--ignore-all-space`, `--ignore-space-change`, `--ignore-blank-lines`, `--exit-code`, `--quiet`, `--check`, `--minimal`, `--patience`, `--histogram`, `--[no-]patch`, `--summary`, `--merge-base`, `--relative`; commits and paths. Not `--output`, which overwrites a file, or `--ext-diff`, which starts a program |
+| `git log` | `-n <n>`, `-<n>`, `-S <text>`, `-G <regex>`, `-p` `-i`, `--max-count`, `--skip`, `--since`, `--after`, `--until`, `--before`, `--author`, `--committer`, `--grep`, `--date`, `--oneline`, `--graph`, `--[no-]decorate`, `--all`, `--branches`, `--tags`, `--remotes`, `--stat`, `--shortstat`, `--numstat`, `--name-only`, `--name-status`, `--[no-]patch`, `--follow`, `--reverse`, `--first-parent`, `--[no-]merges`, `--abbrev-commit`, `--format`, `--pretty`, `--[no-]color`, `--left-right`, `--word-diff`, `--relative-date`, `--date-order`, `--topo-order`, `--regexp-ignore-case`; commits and paths |
+| `git show` | `-U <n>`, `-<n>`, `-p` `-s` `-q` `-w`, `--date`, `--stat`, `--shortstat`, `--numstat`, `--name-only`, `--name-status`, `--oneline`, `--format`, `--pretty`, `--[no-]patch`, `--abbrev-commit`, `--[no-]color`, `--word-diff`, `--quiet`, `--summary`; commits and paths |
+| `git blame` | `-L <range>`, `-w` `-e` `-s` `-l`, `--date`, `--show-email`, `--show-name`, `--show-number`, `--porcelain`, `--line-porcelain`, `--root`, `--show-stats`; a file |
+| `git shortlog` | `-s` `-n` `-e`, `--summary`, `--numbered`, `--email`, `--all`, `--no-merges` |
+| `git ls-files` | `-m` `-o` `-c` `-d` `-s` `-u` `-z` `-t`, `--modified`, `--others`, `--cached`, `--deleted`, `--stage`, `--unmerged`, `--exclude-standard`, `--full-name`, `--error-unmatch`, `--directory`, `--no-empty-directory`, `--eol`; paths |
+| `git ls-remote` | `-q` `-t`, `--sort <key>`, `--heads`, `--branches`, `--tags`, `--refs`, `--quiet`, `--get-url`, `--symref`; a remote and patterns. Not `--upload-pack`, which starts a program |
+| `git rev-parse` | `-q`, `--show-toplevel`, `--abbrev-ref`, `--short`, `--git-dir`, `--git-common-dir`, `--is-inside-work-tree`, `--is-inside-git-dir`, `--verify`, `--quiet`, `--symbolic-full-name`, `--show-prefix`, `--show-cdup`, `--absolute-git-dir`; names |
+| `git describe` | `--tags`, `--all`, `--always`, `--abbrev`, `--dirty`, `--long`, `--contains`, `--exact-match`, `--first-parent`; commits |
+| `git grep` | `-e <pattern>`, `-A` `-B` `-C <n>`, `-<n>`, `-n` `-i` `-w` `-l` `-L` `-c` `-v` `-E` `-F` `-I` `-h` `-H`, `--max-depth`, `--context`, `--after-context`, `--before-context`, `--line-number`, `--ignore-case`, `--word-regexp`, `--files-with-matches`, `--files-without-match`, `--count`, `--invert-match`, `--extended-regexp`, `--fixed-strings`, `--basic-regexp`, `--cached`, `--untracked`, `--break`, `--heading`, `--full-name`, `--only-matching`, `--column`, `--[no-]color`, `--all-match`, `--and`, `--or`, `--not`; patterns and paths. Not `-O`, which starts a program |
+| `git help` | `-a` `-g`, `--all`, `--guides`; a command name |
+| `git version` | `--build-options` |
+| `git add` | `-A` `-u` `-v` `-n` `-N`, `--all`, `--update`, `--verbose`, `--dry-run`, `--intent-to-add`; paths. Not `-f`, which adds ignored files such as secrets |
+| `git commit` | Must have a message: `-m <msg>` (one per paragraph) or `-F <file>`; also `-a`, `--message`, `--file`, `--all`; paths |
+| `git switch` | `<branch>`, or `-c <new-branch> [<start>]`; `-q` `-t`, `--create`, `--quiet`, `--[no-]track`, `--[no-]guess` |
+| `git checkout` | `<branch>`, or `-b <new-branch> [<start>]`; `-q` `-t`, `--quiet`, `--[no-]track` |
+| `git branch` | listing, or `<new-branch> [<start>]`; `-u <upstream>`, `-a` `-r` `-l` `-v`, `--set-upstream-to`, `--sort`, `--format`, `--points-at`, `--all`, `--remotes`, `--list`, `--verbose`, `--show-current`, `--[no-]merged`, `--[no-]contains`, `--[no-]color` |
+| `git restore` | `-S` or `--staged` (required: it only unstages), `-q`, `--quiet`; files |
+| `git reset` | `--soft`, `--mixed`, `-q`, `--quiet`; a commit or files (it takes a commit back and keeps every change) |
+| `git stash` | `push` with `-m <msg>` `-u` `-q`, `--message`, `--include-untracked`, `--quiet`; `pop`, `apply`, `list`, `show` with `-q` `-p`, `--quiet`, `--patch`, `--stat`, `--index` |
+| `git fetch` | a remote and plain branch names; `-p` `-q` `-v` `-t`, `--depth <n>`, `--all`, `--prune`, `--[no-]tags`, `--quiet`, `--verbose`, `--dry-run` |
+| `git pull` | a remote and a plain branch name; `-q` `-v`, `--ff-only`, `--no-rebase`, `--[no-]ff`, `--no-edit`, `--quiet`, `--verbose`, `--tags`, `--autostash` |
+| `git push` | a remote and plain branch names (`a:b` too); `-u` `-n` `-q` `-v`, `--set-upstream`, `--dry-run`, `--quiet`, `--verbose`, `--tags`, `--follow-tags`, `--progress`, `--porcelain` |
+| `git merge` | branches; `-m <msg>`, `-q` `-v`, `--message`, `--[no-]ff`, `--ff-only`, `--no-edit`, `--abort`, `--continue`, `--quit`, `--quiet`, `--verbose`, `--[no-]stat`, `--[no-]log` |
+| `git rm` | files; `-r` `-n` `-q`, `--cached`, `--dry-run`, `--quiet`, `--ignore-unmatch` |
+| `git mv` | files; `-n` `-v` `-k`, `--dry-run`, `--verbose` |
+| `git clean` | `-n` or `--dry-run` (required: it only lists), `-d` `-x` `-X` `-q`, `--quiet` |
+| `git rebase` | `--abort` or `--quit`, alone: steps out of a rebase already under way |
+| `git remote` | nothing, `-v`, `--verbose`, `get-url <name>`, `show <name>` |
+| `git tag` | listing, or `<name> [<commit>]`; `-m <msg>`, `-F <file>`, `-a` `-l` `-n`, `--message`, `--file`, `--annotate`, `--list` |
+| `git reflog` | nothing, or `show` and its arguments |
+| `git init` | `-b <branch>`, `-q`, `--initial-branch`, `--quiet`; a folder |
+| `git clone` | `<url> [<folder>]`; `-b <branch>`, `-q`, `--branch`, `--depth <n>`, `--quiet`, `--[no-]single-branch` |
+| `git config` | reading: a name, `--get`, `--get-all`, `--list`, `-l`, `--show-origin`, `--name-only`. Setting only `user.name`, `user.email`, `color.*`, `core.quotepath`, `core.autocrlf`, `core.safecrlf`, `init.defaultBranch`, `advice.*`, `push.default`, `push.autoSetupRemote`, `pull.ff` and `fetch.prune`, which can't start a program or make `pull` rebase. Scopes `--global`, `--local`, `--system` |
 
 Commands that aren't git pass straight through to Claude Code's own permission prompts, except the
 few that delete a whole project: `rm -rf .git` and `gh repo delete`.
@@ -82,7 +104,8 @@ few that delete a whole project: `rm -rf .git` and `gh repo delete`.
 
 **Anything it can't read exactly**, refused rather than parsed. In a line that mentions git: a
 backslash, a line break, a redirection that can carry a word (`>&`, `<&`, `&>`, `|&`; the plain `2>&1`
-is fine), an unquoted `*`, `?` or `[`, a shell variable, and a PowerShell `@splat`. Anywhere: `$( ... )`,
+is fine), an unquoted `*`, `?` or `[`, a shell variable, and, in PowerShell, an unquoted `(`, `,` or
+`@` (subexpressions, arrays and splats build arguments the guard can't see). Anywhere: `$( ... )`,
 backticks, braces, process substitution, a command named by an expression, variables set in front of
 git, git settings that name a program, and the programs that carry another command (`xargs`, `env`,
 `eval`, `Invoke-Expression`, `Start-Process`, `Set-Variable`, `Set-Alias`, a shell or PowerShell given a
