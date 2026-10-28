@@ -50,14 +50,16 @@ ways to do that:
 
 It reads each command the way a shell would. It checks every part of `a && b; c | d` and what runs
 inside `$( ... )`; looks inside `bash -c "..."`, `powershell -Command "..."` (and its abbreviations),
-`cmd /c`, `eval` and `Invoke-Expression`; sees past `sudo`, `env`, `timeout`, `xargs` and a full path
-to git; matches git's abbreviated options (`--forc` is `--force` to git, so it is here too); looks up
-your git aliases; and ignores text that only mentions a command, like a commit message or a file
-written from a heredoc. It checks the Bash tool and the PowerShell tool.
+`cmd /c`, `eval`, `Invoke-Expression` and `env -S "..."`; sees past `sudo`, `env`, `timeout`, `nice`
+and a full path to git; matches git's abbreviated options (`--forc` is `--force` to git, so it is
+here too); looks up your git aliases; and ignores text that only mentions a command, like a commit
+message or a file written from a heredoc. It checks the Bash tool and the PowerShell tool.
 
 Where it can't see what a command will run, it refuses instead of guessing: a shell variable or
-`$( ... )` in a git command (except in a commit message or a `-C` path), an encoded PowerShell
-command, commands piped into a shell, and git config passed in through the environment.
+`$( ... )` in a git command (except as the message on `commit`, `tag` or `merge`, or the path git's
+own `-C`, `--git-dir` or `--work-tree` takes), git, a shell or `rm` run by `xargs` with arguments
+from its input, an encoded PowerShell command, commands piped into a shell, and git config passed in
+through the environment.
 
 ## What it isn't
 

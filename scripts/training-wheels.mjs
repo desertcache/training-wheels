@@ -244,18 +244,28 @@ const WRAPPERS = new Map([
   ['command', []], ['builtin', []], ['exec', ['-a']], ['nohup', []], ['time', ['-f', '-o']], ['noglob', []],
   ['env', ['-u', '-C', '-S', '--unset', '--chdir', '--split-string']], ['nice', ['-n', '--adjustment']],
   ['timeout', ['-s', '-k', '--signal', '--kill-after']], ['stdbuf', ['-i', '-o', '-e']], ['ionice', ['-c', '-n', '-p']],
-  ['xargs', ['-I', '-i', '-n', '-P', '-L', '-l', '-d', '-E', '-e', '-s', '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs']],
+  // -i, -l and -e take an optional value attached to them (-i{}), never a separate word.
+  ['xargs', ['-I', '-n', '-P', '-L', '-d', '-E', '-s', '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs']],
   ['unbuffer', []], ['chronic', []],
 ]);
 const POSIX_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
 const POWERSHELLS = new Set(['powershell', 'pwsh']);
+// Programs xargs may not run with arguments taken from its input: the arguments are the danger.
+const XARGS_RISKY = new Set(['git', 'gh', 'rm', 'rmdir', 'rd', 'del', 'erase', 'remove-item', 'ri', 'eval', 'cmd',
+  ...POSIX_SHELLS, ...POWERSHELLS, 'xargs', 'env', 'sudo', 'timeout', 'nice', 'nohup', 'command', 'exec']);
 
 // git's own options that take a value, as in "git -C path reset --hard".
 const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--exec-path']);
 
-// Options whose value can't turn into another option or a subcommand: a quoted "$(...)" there is fine
-// (the usual commit-message heredoc), anywhere else it could hide --force.
-const MESSAGE_LIKE = /^(-[A-Za-z]*[mF]|--message|--file|--template|-C|--git-dir|--work-tree)$/;
+// Where a quoted "$X" or "$(...)" can't turn into another option or a subcommand, because it is the
+// value of an option that takes one: a message or message file on commit, tag and merge (the usual
+// commit-message heredoc), and the paths git's own -C, --git-dir and --work-tree take before the
+// subcommand. Anywhere else it could hide --force, so it is refused.
+const MESSAGE_SUBCOMMANDS = new Set(['commit', 'tag', 'merge']);
+const MESSAGE_OPTION = /^(-[A-Za-z]*[mF]|--message|--file|--template)$/;
+const MESSAGE_ATTACHED = /^--(message|file|template)=/;
+const PATH_OPTIONS = new Set(['-C', '--git-dir', '--work-tree']);
+const PATH_ATTACHED = /^--(git-dir|work-tree)=/;
 
 // git's built-in commands. A subcommand that isn't one may be an alias, which is looked up and checked.
 const BUILTINS = new Set(('add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore checkout '
@@ -307,14 +317,32 @@ const UNSEEN = (what) => block('cannot-see', what,
  * @returns {Block | null}
  */
 function checkGit(argWords, ctx, depth = 0) {
-  // Words whose text the guard can't know fail closed, unless they are the value of a message-like option.
-  for (let k = 0; k < argWords.length; k++) {
-    const w = argWords[k];
-    const valueOf = k > 0 ? argWords[k - 1].text : '';
-    if (w.unq || hasBraceExpansion(w.raw)) return UNSEEN('git with a shell variable');
-    if (w.dq && !MESSAGE_LIKE.test(valueOf) && !/^--(message|file|template)=/.test(w.text)) return UNSEEN('git with a shell variable');
-  }
   const args = argWords.map((w) => w.text);
+  const unknown = (w) => w.unq || hasBraceExpansion(w.raw);
+  const VARIABLE = UNSEEN('git with a shell variable');
+
+  // Words whose text the guard can't know fail closed. Before the subcommand, only the value of git's
+  // own -C, --git-dir or --work-tree may be a quoted expansion.
+  let s = 0;
+  while (s < argWords.length && args[s].startsWith('-')) {
+    const w = argWords[s];
+    if (unknown(w) || (w.dq && !PATH_ATTACHED.test(w.text))) return VARIABLE;
+    if (GIT_OPTIONS_WITH_VALUE.has(args[s])) {
+      const v = argWords[s + 1];
+      if (v && (unknown(v) || (v.dq && !PATH_OPTIONS.has(args[s])))) return VARIABLE;
+      s += 2;
+    } else s += 1;
+  }
+  // The subcommand, and what follows it: a quoted expansion only as a message on commit, tag or merge.
+  for (let k = s; k < argWords.length; k++) {
+    const w = argWords[k];
+    if (unknown(w)) return VARIABLE;
+    if (w.dq) {
+      const isMessage = k > s && MESSAGE_SUBCOMMANDS.has(args[s])
+        && (MESSAGE_OPTION.test(args[k - 1]) || MESSAGE_ATTACHED.test(w.text));
+      if (!isMessage) return VARIABLE;
+    }
+  }
 
   let i = 0;
   while (i < args.length && args[i].startsWith('-')) {
@@ -547,10 +575,29 @@ function checkCommand(command, ctx) {
     const withValue = WRAPPERS.get(prog) ?? [];
     let k = 1;
     while (k < w.length && (w[k].text.startsWith('-') || (prog === 'env' && w[k].text.includes('=')))) {
-      if (prog === 'env' && /^GIT_CONFIG/i.test(w[k].text)) return UNSEEN('git with config from the environment');
-      k += withValue.includes(w[k].text) ? 2 : 1;
+      const a = w[k].text;
+      if (prog === 'env' && /^GIT_CONFIG/i.test(a)) return UNSEEN('git with config from the environment');
+      // env -S "git push --force" carries the whole command in one value: check it with the words after it.
+      const split = prog === 'env' && (a === '-S' || a === '--split-string' ? w[k + 1]?.text ?? ''
+        : /^-S./.test(a) ? a.slice(2) : a.startsWith('--split-string=') ? a.slice('--split-string='.length) : null);
+      if (split !== null && split !== false) {
+        const after = w.slice(a === '-S' || a === '--split-string' ? k + 2 : k + 1).map((x) => JSON.stringify(x.text));
+        return checkLine([split, ...after].join(' '), ctx);
+      }
+      if (a === '--') { k++; break; }
+      k += withValue.includes(a) ? 2 : 1;
     }
     if (prog === 'timeout' && k < w.length) k++; // the duration
+    if (prog === 'xargs') {
+      // xargs builds the rest of the command from its input, which the guard can't see. What's written
+      // out is checked as usual; a risky program whose arguments come from input is refused.
+      const inner = w.slice(k);
+      const target = inner.length ? program(inner[0].text) : '';
+      const written = inner.length ? checkCommand(inner, ctx) : null;
+      if (written) return written;
+      if (XARGS_RISKY.has(target)) return UNSEEN(`xargs running ${target}`);
+      return null;
+    }
     w = w.slice(k);
   }
   if (!w.length) return null;

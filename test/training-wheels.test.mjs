@@ -28,14 +28,17 @@ const BLOCKED = {
     'bash -xc "git push --force"', 'sh -c "git status && git push -f"', 'powershell -Comm "git push --force"', 'pwsh -Com "git push --force"',
     'powershell -NoProfile "git push --force"', 'eval "git push --force"', 'timeout 30 git push --force', 'nice -n 5 git push -f',
     'Start-Process git -ArgumentList "push","--force"', 'git yolo', 'git -c alias.p="push --force" p', 'git config alias.yolo "push --force"',
-    'git config --global alias.yolo "!git push --force"'],
+    'git config --global alias.yolo "!git push --force"',
+    // env -S carries a whole command in one value
+    'env -S "git push --force"', 'env -S"git push" --force', 'env -i -S "git -C . push -f"'],
   'remote-delete': ['git push --delete origin old', 'git push origin :old', 'git push -d origin old', 'git push --mirror', 'git push --prune origin',
     'git push --del origin old'],
   'reset-hard': ['git reset --hard', 'git reset --hard HEAD~1', 'git -C ../repo reset --hard', 'cd repo && git reset --hard origin/main',
     'git -c core.pager=cat reset --hard', 'git reset --har',
     'bash -c "git reset --hard"', 'powershell -Command "git status; git reset --hard"', 'cmd /c git reset --hard', 'cmd /C "git reset --hard"',
     'sh -euc "git reset --hard"', 'bash -o pipefail -c "git reset --hard"', 'iex "git reset --hard"', 'Invoke-Expression "git reset --hard"',
-    'bash <<< "git reset --hard"', 'git nuke', 'env -i git reset --hard', 'git -C "$HOME/repo" reset --hard'],
+    'bash <<< "git reset --hard"', 'git nuke', 'env -i git reset --hard', 'git -C "$HOME/repo" reset --hard',
+    'env --split-string="git reset --hard"'],
   'branch-force-delete': ['git branch -D feature', 'git branch --delete --force feature', 'git branch -df feature',
     'echo feature | xargs git branch -D', 'xargs -I {} git branch -D {}'],
   'branch-force': ['git branch -f feature main', 'git branch -M feature', 'git branch -C feature copy', 'git branch --forc feature main'],
@@ -65,7 +68,12 @@ const BLOCKED = {
     'echo "git push --force" | bash', 'bash < cmds.txt', 'bash -s', 'cmd < cmds.txt',
     'powershell -EncodedCommand ZwBpAHQAIABwAHUAcwBoAA==', 'powershell -e ZwBpAHQA', 'pwsh -ec ZwBpAHQA', 'powershell -Command -',
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0="push --force" git x',
-    'env GIT_CONFIG_PARAMETERS="\'alias.x=push --force\'" git x'],
+    'env GIT_CONFIG_PARAMETERS="\'alias.x=push --force\'" git x',
+    // xargs builds the command from input the guard can't see
+    'echo "push --force" | xargs git', 'xargs -I{} git {}', 'xargs -a args.txt git', 'ls | xargs rm -rf', 'xargs -0 bash -c',
+    // a quoted expansion is a message only on commit, tag and merge, and a path only before the subcommand
+    'git push -m "$(echo --force)"', 'git push --file "$(echo --force)"', 'git status -C "$X"', 'git stash push -m "$X"',
+    'git -c "user.name=$N" status'],
 };
 
 const ALLOWED = [
@@ -83,7 +91,8 @@ const ALLOWED = [
   // A quoted expansion is fine where it can only be a message or a path: the usual commit heredoc, -C "$HOME/...".
   "git commit -m \"$(cat <<'EOF'\nDocs: why we never git push --force\n\nIt rewrites shared history.\nEOF\n)\"",
   "git commit -am \"$(cat <<'EOF'\nDon't break the build\nEOF\n)\"", 'git commit -m "costs $5"', 'git -C "$HOME/repo" status',
-  'git commit --message="$MSG"',
+  'git commit --message="$MSG"', "git tag -a v1 -m \"$(cat <<'EOF'\nRelease one\nEOF\n)\"", 'git merge -F "$MSGFILE" main',
+  'git --git-dir="$HOME/x/.git" status', 'ls | xargs echo', 'find . -name "*.tmp" | xargs wc -l', 'echo hi | xargs',
   "cat > NOTES.md <<'EOF'\ngit push --force\nrm -rf .git\nEOF\ngit add NOTES.md",
 ];
 
