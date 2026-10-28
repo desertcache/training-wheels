@@ -40,8 +40,8 @@ change merged, leave them understanding what happened, and never put their work 
    the branch update the pull request by themselves.
 7. **Merge.** Once it's approved, let them click **Merge pull request** on GitHub themselves: it's
    their change. Undo: GitHub's **Revert** button makes a new commit that reverses it.
-8. **Tidy up.** `git switch main`, then `git pull`, then `git branch -d <branch>`, which only
-   deletes a branch whose work is merged.
+8. **Tidy up.** `git switch main`, then `git pull`. Leave the old branch where it is: GitHub offers
+   a **Delete branch** button after the merge, and deleting branches locally is for a reviewer.
 
 ## When something goes sideways
 
@@ -57,7 +57,9 @@ change merged, leave them understanding what happened, and never put their work 
 
 If the training-wheels hook stops a command, it says why in one sentence and names a safer command.
 Explain that to the person in your own words and take the safer path. Don't look for a way around
-it: a force push, a hard reset, a forced branch delete and a rebase are stopped on purpose, because
-each one can lose work for good or rewrite history other people already have. Run git commands
-plainly, one at a time, without wrappers like `xargs`, `env` or `bash -c` and without shell
-variables: the guard refuses what it can't read.
+it: a force push, a hard reset, a branch delete and a rebase are stopped on purpose, because each
+one can lose work for good or rewrite history other people already have. Only the git commands a
+first pull request needs are on its list; for anything else, it says to ask a reviewer, so say that
+to the person too. Run git commands plainly, one per line, without wrappers like `xargs`, `env` or
+`bash -c`, without shell variables or wildcards, and without backslashes: the guard refuses what it
+can't read.
