@@ -739,10 +739,16 @@ export function check(line, context = {}) {
   };
   const raw = rawRefusal(line);
   if (raw) return unreadable(raw);
-  // PowerShell builds arguments from expressions: (subexpressions), @(arrays), a,b lists and @splats.
-  if (ctx.shell === 'powershell' && MENTIONS_GIT.test(line)) {
-    const c = unquoted(line, '(,@');
-    if (c) return unreadable(`a PowerShell ${c} in a git line`);
+  if (MENTIONS_GIT.test(line)) {
+    // Curly quotes are quotes to PowerShell but not to this reader, so the two could split a line differently.
+    if (/[“”‘’]/.test(line)) return unreadable('a curly quote in a git line');
+    if (ctx.shell === 'powershell') {
+      // The backtick is PowerShell's escape character; nothing a first pull request needs uses it.
+      if (line.includes('`')) return unreadable('a PowerShell backtick in a git line');
+      // PowerShell builds arguments from expressions: (subexpressions), @(arrays), a,b lists and @splats.
+      const c = unquoted(line, '(,@');
+      if (c) return unreadable(`a PowerShell ${c} in a git line`);
+    }
   }
   const { commands, why } = parse(line.replace(FD_DUP, '$1'), ctx.shell);
   if (why) return unreadable(why);

@@ -104,8 +104,9 @@ few that delete a whole project: `rm -rf .git` and `gh repo delete`.
 
 **Anything it can't read exactly**, refused rather than parsed. In a line that mentions git: a
 backslash, a line break, a redirection that can carry a word (`>&`, `<&`, `&>`, `|&`; the plain `2>&1`
-is fine), an unquoted `*`, `?` or `[`, a shell variable, and, in PowerShell, an unquoted `(`, `,` or
-`@` (subexpressions, arrays and splats build arguments the guard can't see). Anywhere: `$( ... )`,
+is fine), an unquoted `*`, `?` or `[`, a shell variable, curly quotes (`“ ” ‘ ’`, which PowerShell
+reads as quotes), and, in PowerShell, a backtick anywhere (its escape character) or an unquoted `(`,
+`,` or `@` (subexpressions, arrays and splats build arguments the guard can't see). Anywhere: `$( ... )`,
 backticks, braces, process substitution, a command named by an expression, variables set in front of
 git, git settings that name a program, and the programs that carry another command (`xargs`, `env`,
 `eval`, `Invoke-Expression`, `Start-Process`, `Set-Variable`, `Set-Alias`, a shell or PowerShell given a

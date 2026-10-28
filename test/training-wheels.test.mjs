@@ -151,6 +151,19 @@ test('PowerShell: a git line with an unquoted ( , or @ is refused, since those b
   }
 });
 
+test('PowerShell: a git line with a backtick anywhere is refused', () => {
+  for (const c of ['git commit -m "it`"s done"', "git commit -m 'it''s`n done'", 'git push origin main `\n--force']) {
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+});
+
+test('a git line with curly quotes is refused in both shells', () => {
+  for (const c of ['git commit -m “fix it”', 'git push ‘--force’', 'git commit -m "it’s done"']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+});
+
 test('splits commands at separators but never inside quotes', () => {
   assert.deepEqual(splitCommands('git add -A && git commit -m "a; b && c" | cat'), [['git', 'add', '-A'], ['git', 'commit', '-m', 'a; b && c'], ['cat']]);
   assert.deepEqual(splitCommands("echo 'it''s'; git status"), [['echo', 'its'], ['git', 'status']]);
