@@ -48,18 +48,26 @@ ways to do that:
 | `rm -rf .git` | Deletes the project's entire history | Ask for help with whatever you were undoing |
 | `gh repo delete` | Deletes the repository on GitHub | Archive it instead |
 
-It reads each command the way a shell would: it checks every part of `a && b; c | d`, looks inside
-`bash -c "..."`, `powershell -Command "..."` and `cmd /c`, sees past `sudo`, `env` and a full path to
-git, and ignores text that only mentions a command, like a commit message or a file written from a
-heredoc. It checks the Bash tool and the PowerShell tool.
+It reads each command the way a shell would. It checks every part of `a && b; c | d` and what runs
+inside `$( ... )`; looks inside `bash -c "..."`, `powershell -Command "..."` (and its abbreviations),
+`cmd /c`, `eval` and `Invoke-Expression`; sees past `sudo`, `env`, `timeout`, `xargs` and a full path
+to git; matches git's abbreviated options (`--forc` is `--force` to git, so it is here too); looks up
+your git aliases; and ignores text that only mentions a command, like a commit message or a file
+written from a heredoc. It checks the Bash tool and the PowerShell tool.
+
+Where it can't see what a command will run, it refuses instead of guessing: a shell variable or
+`$( ... )` in a git command (except in a commit message or a `-C` path), an encoded PowerShell
+command, commands piped into a shell, and git config passed in through the environment.
 
 ## What it isn't
 
-It's a seatbelt, not a sandbox. It catches the honest mistakes an agent makes when it's trying to
-help, like "let me reset that for you". It doesn't know your git aliases, and an agent determined to
-get around it could, for example by writing a script that runs git for it. The skill tells Claude
-not to look for a way around it. For real protection on a shared branch, turn on branch protection
-on GitHub.
+**It's for catching a beginner's mistakes, not for stopping an adversary.** It catches the honest
+mistakes an agent makes while trying to help, like "let me reset that for you". Anything that can run
+code can get around a check like this: an agent determined to could write a script that runs git
+(the hook doesn't read scripts, `npm run` targets or Makefiles), or use a program other than git to
+change files. The skill tells Claude not to look for a way around it. For real protection on a
+shared branch, turn on branch protection on GitHub; for an agent you don't trust, run it in a
+sandbox.
 
 If the hook itself ever fails (bad input, a Node error), it lets the command through and Claude Code
 shows a one-line notice, rather than locking you out of git.
@@ -138,7 +146,8 @@ same sentence, and Claude takes the safer path.
 
 ## Tests
 
-`npm test` runs every command in the table above through the guard, plus everyday commands that must
+`npm test` runs every command in the table above through the guard (with their abbreviations, quoting
+tricks, wrappers, aliases and nested shells), plus everyday commands that must
 pass (`git status`, `git push -u origin`, `git branch -d`, `git restore --staged`, `git reset --soft`,
 `git clean -n`, commit messages that mention dangerous commands, and heredocs), and runs the hook the
 way Claude Code does: JSON in, a decision out.
