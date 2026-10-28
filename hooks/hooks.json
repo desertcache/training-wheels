@@ -1,0 +1,17 @@
+{
+  "description": "training-wheels: stop the git commands a beginner can't take back",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|PowerShell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/training-wheels.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

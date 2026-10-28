@@ -1,0 +1,14 @@
+{
+  "name": "training-wheels",
+  "owner": {
+    "name": "Samuel Bates"
+  },
+  "description": "One plugin: training wheels for a first pull request.",
+  "plugins": [
+    {
+      "name": "training-wheels",
+      "source": "./",
+      "description": "A plain-words walkthrough of a first pull request, and a hook that stops the git commands you can't take back."
+    }
+  ]
+}

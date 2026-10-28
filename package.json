@@ -1,0 +1,14 @@
+{
+  "name": "training-wheels",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Claude Code skill and hook for a first pull request: plain-words steps, and a guard against the git commands you can't take back.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "name": "training-wheels",
+  "displayName": "Training wheels",
+  "version": "0.1.0",
+  "description": "Training wheels for a first pull request: a skill that walks you through branch, commit, pull request and merge in plain words, and a hook that stops the git commands you can't take back.",
+  "author": {
+    "name": "Samuel Bates",
+    "url": "https://desertcache.github.io/portfolio/"
+  },
+  "homepage": "https://github.com/desertcache/training-wheels",
+  "repository": "https://github.com/desertcache/training-wheels",
+  "license": "MIT",
+  "keywords": ["git", "beginners", "pull-request", "safety", "hooks", "skills"]
+}
