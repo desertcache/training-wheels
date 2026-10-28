@@ -31,7 +31,9 @@ change merged, leave them understanding what happened, and never put their work 
 3. **Make the change.** Edit the files together, then run `git status` and `git diff` and read back
    what changed.
 4. **Commit.** `git add <the files>`, then `git commit -m "<one sentence: what changed and why>"`.
-   Undo: `git reset --soft HEAD~1` takes the commit back and keeps every change.
+   For a longer message, add another `-m` per paragraph; don't build the message with `$( ... )` or a
+   heredoc, because the guard refuses commands it can't read. Undo: `git reset --soft HEAD~1` takes
+   the commit back and keeps every change.
 5. **Push.** `git push -u origin <branch>` copies their branch to GitHub. It doesn't change main.
 6. **Open the pull request.** `gh pr create --fill` if the GitHub CLI is set up; otherwise give them
    the link git printed after the push. Explain that reviewers can comment, and that new commits on
@@ -56,4 +58,6 @@ change merged, leave them understanding what happened, and never put their work 
 If the training-wheels hook stops a command, it says why in one sentence and names a safer command.
 Explain that to the person in your own words and take the safer path. Don't look for a way around
 it: a force push, a hard reset, a forced branch delete and a rebase are stopped on purpose, because
-each one can lose work for good or rewrite history other people already have.
+each one can lose work for good or rewrite history other people already have. Run git commands
+plainly, one at a time, without wrappers like `xargs`, `env` or `bash -c` and without shell
+variables: the guard refuses what it can't read.

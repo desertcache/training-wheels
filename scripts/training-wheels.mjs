@@ -7,10 +7,15 @@
 // command, and the command never runs. Anything else gets no output, so Claude Code's normal
 // permission flow carries on.
 //
-// What it is for: catching the honest mistakes an agent makes while helping a beginner. It reads
-// commands the way a shell would, and where it can't see what a command will run (a shell
-// variable, an encoded command, a command fed to a shell on stdin), it refuses rather than guess.
-// It is not a sandbox and not a defense against an agent set on getting around it (see README.md).
+// What it is for: catching the honest mistakes an agent makes while helping a beginner. It is not a
+// sandbox and not a defense against an agent set on getting around it.
+//
+// How it reads a command: it fully models plain `git <subcommand> ...`, walking each subcommand's
+// options the way git does, and a few wrappers it can strip exactly (sudo, command, exec,
+// timeout N, nice, nohup). Anything else that could carry a command (xargs, env, eval, a shell or
+// PowerShell running a string, $( ... ), backticks, braces, a shell variable in a git command, an
+// alias) is refused on purpose, with a note to run the command itself. Failing closed is the design:
+// a command the guard can't read safely doesn't run.
 //
 // It only stops the agent. You can still type any of these yourself, and TRAINING_WHEELS=off in
 // the environment Claude Code starts in turns the check off.
@@ -23,158 +28,119 @@ import { resolve, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------------------------
-// Reading a command line the way a shell would
+// Reading a command line
 // ---------------------------------------------------------------------------------------------
 
 /**
- * A word, after quote removal. `dq`: it holds an expansion inside double quotes ("$X", "$(...)"),
- * so it stays one word but its text is unknown. `unq`: it holds an unquoted expansion ($X, $(...),
- * `...`, {a,b}), which can become any number of words.
- * @typedef {{ text: string, raw: string, dq: boolean, unq: boolean }} Word
+ * A word, after quote removal. `dollar`: it holds a $ expansion (unquoted or inside double quotes)
+ * or an ANSI-C $'...' string. `escape`: it holds a backslash escape the shell would remove.
+ * @typedef {{ text: string, dollar: boolean, escape: boolean }} Word
+ * @typedef {{ commands: Word[][], unreadable: string | null }} Parsed
  */
 
-/** @param {string} c */
-const startsExpansion = (c) => c !== undefined && /[A-Za-z_{0-9@*#?$!-]/.test(c);
+/** What can follow a $ to make it an expansion. @param {string | undefined} c */
+const expands = (c) => c !== undefined && /[A-Za-z_{(0-9@*#?$!'"-]/.test(c);
 
 /**
- * Decode one ANSI-C escape ($'...') starting at src[i] (the character after the backslash).
- * @param {string} src @param {number} i
- * @returns {[string, number]} the character(s) and how many source characters were used
- */
-function ansiEscape(src, i) {
-  const c = src[i];
-  const simple = { n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', e: '\x1b', E: '\x1b', f: '\f', v: '\v', '\\': '\\', "'": "'", '"': '"', '?': '?' };
-  if (c in simple) return [simple[c], 1];
-  const hex = (max, from) => {
-    let j = from;
-    while (j < src.length && j - from < max && /[0-9a-fA-F]/.test(src[j])) j++;
-    return j;
-  };
-  if (c === 'x' || c === 'u' || c === 'U') {
-    const end = hex(c === 'x' ? 2 : c === 'u' ? 4 : 8, i + 1);
-    if (end === i + 1) return ['\\' + c, 1];
-    return [String.fromCodePoint(parseInt(src.slice(i + 1, end), 16)), end - i];
-  }
-  if (/[0-7]/.test(c)) {
-    let j = i;
-    while (j < src.length && j - i < 3 && /[0-7]/.test(src[j])) j++;
-    return [String.fromCharCode(parseInt(src.slice(i, j), 8)), j - i];
-  }
-  if (c === 'c' && i + 1 < src.length) return [String.fromCharCode(src.charCodeAt(i + 1) & 31), 2];
-  return ['\\' + c, 1];
-}
-
-/**
- * Parse src from i into simple commands, appending them to `out`. Command substitutions
- * ($( ... ) and backticks) are parsed recursively: their commands are checked too, and the word
- * they sit in is marked as unknown. Heredoc bodies are skipped as text.
+ * Split a command line into simple commands at ; && || | & newlines and parentheses, never inside
+ * quotes, skipping heredoc bodies. It also notes the first thing that makes the line unreadable:
+ * a command substitution, a backtick, an unquoted brace (a group or a script block), a process
+ * substitution, or a heredoc whose body would run a command.
  * @param {string} src
- * @param {number} i
- * @param {boolean} untilParen stop at the ) that closes a $( ... )
- * @param {Word[][]} out
- * @returns {number} the index just past where parsing stopped
+ * @returns {Parsed}
  */
-function parse(src, i, untilParen, out) {
+export function parse(src) {
+  /** @type {Word[][]} */
+  const commands = [];
   /** @type {Word[]} */
   let words = [];
   /** @type {Word | null} */
   let cur = null;
-  /** @type {null | "'" | '"' | 'ansi'} */
+  /** @type {null | "'" | '"'} */
   let quote = null;
-  /** @type {{ delim: string, strip: boolean }[]} */
+  /** @type {{ delim: string, strip: boolean, expands: boolean }[]} */
   let heredocs = [];
-  let depth = 0;
-  const word = () => (cur ??= { text: '', raw: '', dq: false, unq: false });
+  /** @type {string | null} */
+  let unreadable = null;
+  const flag = (why) => { unreadable ??= why; };
+  const word = () => (cur ??= { text: '', dollar: false, escape: false });
   const endWord = () => {
     if (cur) words.push(cur);
     cur = null;
   };
   const endCommand = () => {
     endWord();
-    if (words.length) out.push(words);
+    if (words.length) commands.push(words);
     words = [];
   };
-  /** A backtick substitution starting at src[at] (the opening backtick): parse it, return its end. */
-  const backtick = (at) => {
-    let j = at + 1;
-    while (j < src.length && src[j] !== '`') j += src[j] === '\\' ? 2 : 1;
-    parse(src.slice(at + 1, j), 0, false, out);
-    return j;
-  };
 
-  for (; i < src.length; i++) {
+  for (let i = 0; i < src.length; i++) {
     const c = src[i];
     if (quote === "'") {
       if (c === "'") quote = null;
       else word().text += c;
       continue;
     }
-    if (quote === 'ansi') {
-      if (c === "'") quote = null;
-      else if (c === '\\' && i + 1 < src.length) {
-        const [ch, used] = ansiEscape(src, i + 1);
-        word().text += ch;
-        i += used;
-      } else word().text += c;
-      continue;
-    }
     if (quote === '"') {
       if (c === '"') quote = null;
-      else if (c === '\\' && i + 1 < src.length && '"\\$`'.includes(src[i + 1])) word().text += src[++i];
-      else if (c === '$' && src[i + 1] === '(') {
-        word().dq = true;
-        i = parse(src, i + 2, true, out) - 1;
-      } else if (c === '`') {
-        word().dq = true;
-        i = backtick(i);
+      else if (c === '\\' && '"\\$`'.includes(src[i + 1] ?? '')) {
+        word().escape = true;
+        word().text += src[++i];
       } else {
-        if (c === '$' && startsExpansion(src[i + 1])) word().dq = true;
+        if (c === '`') flag('a backtick');
+        if (c === '$' && src[i + 1] === '(') flag('$( ... )');
+        if (c === '$' && expands(src[i + 1])) word().dollar = true;
         word().text += c;
       }
       continue;
     }
-
     // Unquoted.
-    if (c === '$' && src[i + 1] === "'") {
-      word();
-      quote = 'ansi';
-      i++;
-    } else if (c === '$' && src[i + 1] === '"') {
-      word();
-      quote = '"';
-      i++;
-    } else if (c === "'" || c === '"') {
+    if (c === "'" || c === '"') {
       word();
       quote = c;
-    } else if (c === '\\' && i + 1 < src.length) {
-      if (src[i + 1] !== '\n') word().text += src[i + 1];
+    } else if (c === '\\') {
+      if (src[i + 1] !== '\n') {
+        word().escape = true;
+        if (i + 1 < src.length) word().text += src[i + 1];
+      }
       i++;
-    } else if (c === '$' && src[i + 1] === '(') {
-      word().unq = true;
-      i = parse(src, i + 2, true, out) - 1;
     } else if (c === '`') {
-      word().unq = true;
-      i = backtick(i);
+      flag('a backtick');
+    } else if (c === '$') {
+      if (src[i + 1] === '(') flag('$( ... )');
+      if (expands(src[i + 1])) word().dollar = true;
+      word().text += c;
+    } else if (c === '{' || c === '}') {
+      flag('braces');
+      word().text += c;
+    } else if ((c === '<' || c === '>') && src[i + 1] === '(') {
+      flag('process substitution');
+      endCommand();
     } else if (src.startsWith('<<<', i)) {
       endWord();
-      words.push({ text: '<<<', raw: '<<<', dq: false, unq: false });
+      words.push({ text: '<<<', dollar: false, escape: false });
       i += 2;
     } else if (c === '<' && src[i + 1] === '<') {
-      // A heredoc: note its delimiter; its body starts at the next newline and is only text.
+      // A heredoc: note its delimiter; its body starts at the next newline.
       let j = i + 2;
       const strip = src[j] === '-';
       if (strip) j++;
       while (src[j] === ' ' || src[j] === '\t') j++;
       let delim = '';
-      if (src[j] === "'" || src[j] === '"') {
-        const q = src[j++];
-        while (j < src.length && src[j] !== q) delim += src[j++];
-        j++;
-      } else {
-        while (j < src.length && !/[\s;&|<>()]/.test(src[j])) delim += src[j++];
+      let quoted = false;
+      while (j < src.length && !/[\s;&|<>()]/.test(src[j])) {
+        if (src[j] === "'" || src[j] === '"') {
+          const q = src[j++];
+          quoted = true;
+          while (j < src.length && src[j] !== q) delim += src[j++];
+          j++;
+        } else if (src[j] === '\\') {
+          quoted = true;
+          delim += src[j + 1] ?? '';
+          j += 2;
+        } else delim += src[j++];
       }
-      delim = delim.replace(/\\/g, '');
-      if (delim) heredocs.push({ delim, strip });
+      if (delim) heredocs.push({ delim, strip, expands: !quoted });
       endWord();
       i = j - 1;
     } else if (c === '\n' && heredocs.length) {
@@ -188,88 +154,85 @@ function parse(src, i, untilParen, out) {
           if (h.strip) text = text.replace(/^\t+/, '');
           pos = end + 1;
           if (text === h.delim) break;
+          if (h.expands && /\$\(|`/.test(text)) flag('a heredoc that runs a command');
         }
       }
       heredocs = [];
       i = pos - 1;
-    } else if (c === '(') {
-      endCommand();
-      depth++;
-    } else if (c === ')') {
-      endCommand();
-      if (untilParen && depth === 0) return i + 1;
-      depth = Math.max(0, depth - 1);
-    } else if (';&|\n\r'.includes(c)) {
+    } else if (';&|()\n\r'.includes(c)) {
       endCommand();
     } else if (/\s/.test(c)) {
       endWord();
     } else {
-      const w = word();
-      if (c === '$' && startsExpansion(src[i + 1])) w.unq = true;
-      w.text += c;
-      w.raw += c;
+      word().text += c;
     }
   }
   endCommand();
-  return i;
+  return { commands, unreadable };
 }
 
-/** Brace expansion, as in --{force,x}, turns one word into several. @param {string} text */
-const hasBraceExpansion = (text) => /\{[^{}]*(,|\.\.)[^{}]*\}/.test(text);
-
 /**
- * Split a command line into simple commands, each a list of words with quotes removed (including
- * the commands inside $( ... ) and backticks). Never splits inside quotes, so a commit message that
- * mentions a dangerous command is just text, and heredoc bodies are text too.
+ * The simple commands in a line, as plain words. Kept for tests and for anyone reusing the parser.
  * @param {string} src
  * @returns {string[][]}
  */
 export function splitCommands(src) {
-  /** @type {Word[][]} */
-  const out = [];
-  parse(src, 0, false, out);
-  return out.map((ws) => ws.map((w) => w.text));
+  return parse(src).commands.map((ws) => ws.map((w) => w.text));
 }
 
 // ---------------------------------------------------------------------------------------------
-// The rules
+// What a refusal says
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * @typedef {{ rule: string, shown: string, why: string, instead: string }} Block
+ * @typedef {{ cwd?: string, isRef?: (name: string) => boolean, isPath?: (name: string) => boolean, alias?: (name: string) => string | null }} Context
+ */
+
+/** @param {string} rule @param {string} shown @param {string} why @param {string} instead @returns {Block} */
+const block = (rule, shown, why, instead) => ({ rule, shown, why, instead });
+
+/** A command the guard can't read safely. @param {string} what */
+const unreadable = (what) => block('cannot-read', what,
+  "the guard can't read safely what it would run, so it doesn't run",
+  'run the command itself, written out in full, without wrappers, variables or $( ... ); for a long commit message, use one -m per paragraph');
+
+// ---------------------------------------------------------------------------------------------
+// Programs
 // ---------------------------------------------------------------------------------------------
 
 /** The program a word names: "C:\\Program Files\\Git\\cmd\\git.exe" and "/usr/bin/git" are both "git". */
 const program = (w) => basename(w.replace(/\\/g, '/')).replace(/\.exe$/i, '').toLowerCase();
 
-// Programs that run the command that follows them, and their options that take a value.
-const WRAPPERS = new Map([
-  ['sudo', ['-u', '-g', '-h', '-p', '-C', '-D', '-r', '-t', '-U', '--user', '--group', '--host', '--prompt']],
-  ['command', []], ['builtin', []], ['exec', ['-a']], ['nohup', []], ['time', ['-f', '-o']], ['noglob', []],
-  ['env', ['-u', '-C', '-S', '--unset', '--chdir', '--split-string']], ['nice', ['-n', '--adjustment']],
-  ['timeout', ['-s', '-k', '--signal', '--kill-after']], ['stdbuf', ['-i', '-o', '-e']], ['ionice', ['-c', '-n', '-p']],
-  // -i, -l and -e take an optional value attached to them (-i{}), never a separate word.
-  ['xargs', ['-I', '-n', '-P', '-L', '-d', '-E', '-s', '-a', '--arg-file', '--delimiter', '--max-args', '--max-procs']],
-  ['unbuffer', []], ['chronic', []],
-]);
-const POSIX_SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish']);
+const RM = new Set(['rm', 'rmdir', 'rd', 'del', 'erase', 'remove-item', 'ri']);
+// Programs that run another command given to them: refused, because the guard can't read what they'd run.
+const CARRIERS = new Set(['xargs', 'env', 'eval', 'iex', 'invoke-expression', 'invoke-command', 'icm', 'start-process', 'saps',
+  'start', 'start-job', 'sajb', 'foreach-object', '%', 'parallel', 'watch', 'su', 'doas', 'runas', 'chroot', 'script', 'unbuffer',
+  'stdbuf', 'ionice', 'chronic', 'time', 'busybox', 'cmd', 'wsl', 'trap']);
+const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh']);
 const POWERSHELLS = new Set(['powershell', 'pwsh']);
-// Programs xargs may not run with arguments taken from its input: the arguments are the danger.
-const XARGS_RISKY = new Set(['git', 'gh', 'rm', 'rmdir', 'rd', 'del', 'erase', 'remove-item', 'ri', 'eval', 'cmd',
-  ...POSIX_SHELLS, ...POWERSHELLS, 'xargs', 'env', 'sudo', 'timeout', 'nice', 'nohup', 'command', 'exec']);
+// Interpreters, and the flags that make them run code given on the command line.
+const INLINE_CODE = new Map([
+  ['node', /^(-e|--eval|-p|--print)$/], ['python', /^-c$/], ['python3', /^-c$/], ['py', /^-c$/], ['perl', /^-[eE]$/],
+  ['ruby', /^-e$/], ['php', /^-r$/], ['deno', /^eval$/], ['bun', /^(-e|--eval)$/],
+]);
+// Variables that make git run a program, or change which git runs.
+const RISKY_VARIABLE = /^(GIT_[A-Z_]*|EDITOR|VISUAL|PAGER|PATH|LESS|LESSOPEN|BASH_ENV|ENV)$/i;
 
-// git's own options that take a value, as in "git -C path reset --hard".
-const GIT_OPTIONS_WITH_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env', '--exec-path']);
+// ---------------------------------------------------------------------------------------------
+// git: global options, subcommands and each subcommand's options
+// ---------------------------------------------------------------------------------------------
 
-// Where a quoted "$X" or "$(...)" can't turn into another option or a subcommand, because it is the
-// value of an option that takes one: a message or message file on commit, tag and merge (the usual
-// commit-message heredoc), and the paths git's own -C, --git-dir and --work-tree take before the
-// subcommand. Anywhere else it could hide --force, so it is refused.
-const MESSAGE_SUBCOMMANDS = new Set(['commit', 'tag', 'merge']);
-const MESSAGE_OPTION = /^(-[A-Za-z]*[mF]|--message|--file|--template)$/;
-const MESSAGE_ATTACHED = /^--(message|file|template)=/;
-const PATH_OPTIONS = new Set(['-C', '--git-dir', '--work-tree']);
-const PATH_ATTACHED = /^--(git-dir|work-tree)=/;
+// git's own options before the subcommand. Anything else there is refused.
+const GIT_GLOBAL_VALUE = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace']);
+const GIT_GLOBAL_FLAG = new Set(['--no-pager', '-P', '--paginate', '-p', '--bare', '--no-replace-objects', '--literal-pathspecs',
+  '--glob-pathspecs', '--noglob-pathspecs', '--icase-pathspecs', '--no-optional-locks', '--no-lazy-fetch', '--version', '--help', '-v', '-h']);
+// Settings that can't make git run a program: the only ones -c or git config may set.
+const SAFE_CONFIG = /^(user\.(name|email)|color\.[a-z.]+|core\.(quotepath|autocrlf|safecrlf|filemode|ignorecase)|init\.defaultbranch|advice\.[a-z]+|push\.(default|autosetupremote)|pull\.(rebase|ff)|fetch\.prune|log\.(decorate|date)|merge\.conflictstyle|diff\.(renames|algorithm|colormoved))$/i;
 
-// git's built-in commands. A subcommand that isn't one may be an alias, which is looked up and checked.
+// git's built-in commands. A subcommand that isn't one may be an alias, which is refused.
 const BUILTINS = new Set(('add am annotate apply archive bisect blame branch bundle cat-file check-attr check-ignore checkout '
-  + 'cherry cherry-pick citool clean clone column commit commit-tree config count-objects credential describe diff '
+  + 'checkout-index cherry cherry-pick citool clean clone column commit commit-tree config count-objects credential describe diff '
   + 'diff-files diff-index diff-tree difftool fast-export fast-import fetch filter-branch for-each-ref format-patch fsck '
   + 'gc grep gui hash-object help init instaweb log ls-files ls-remote ls-tree maintenance merge merge-base mergetool mv '
   + 'name-rev notes prune pull push range-diff read-tree rebase reflog remote repack replace request-pull reset restore '
@@ -277,155 +240,235 @@ const BUILTINS = new Set(('add am annotate apply archive bisect blame branch bun
   + 'symbolic-ref tag update-index update-ref var verify-commit verify-tag version whatchanged worktree write-tree').split(' '));
 
 /**
- * @typedef {{ rule: string, shown: string, why: string, instead: string }} Block
- * @typedef {{ cwd?: string, isRef?: (name: string) => boolean, isPath?: (name: string) => boolean, alias?: (name: string) => string | null }} Context
+ * Each modeled subcommand's options: short letters that take a value (attached, or the next word),
+ * letters whose value can only be attached, letters that take none, and long options that take a
+ * value or none. An option that takes a value consumes it, so a value never reads as an option.
+ * @typedef {{ shortValue?: string, shortOptional?: string, shortFlags?: string, longValue?: string[], longFlags?: string[] }} Spec
+ * @type {Record<string, Spec>}
  */
+const SPECS = {
+  push: {
+    shortValue: 'o', shortFlags: 'fundqv46',
+    longValue: ['--repo', '--push-option', '--receive-pack', '--exec'],
+    longFlags: ['--all', '--branches', '--mirror', '--delete', '--tags', '--dry-run', '--porcelain', '--force', '--prune',
+      '--verbose', '--quiet', '--progress', '--no-progress', '--no-verify', '--verify', '--follow-tags', '--no-follow-tags',
+      '--atomic', '--no-atomic', '--thin', '--no-thin', '--ipv4', '--ipv6', '--set-upstream', '--signed', '--no-signed',
+      '--force-with-lease', '--no-force-with-lease', '--force-if-includes', '--no-force-if-includes', '--recurse-submodules',
+      '--no-recurse-submodules'],
+  },
+  reset: {
+    shortFlags: 'qpN',
+    longValue: ['--pathspec-from-file'],
+    longFlags: ['--soft', '--mixed', '--hard', '--merge', '--keep', '--quiet', '--patch', '--no-refresh', '--refresh',
+      '--intent-to-add', '--recurse-submodules', '--no-recurse-submodules', '--pathspec-file-nul'],
+  },
+  branch: {
+    shortValue: 'u', shortFlags: 'dDmMcCfralvqit',
+    longValue: ['--set-upstream-to', '--points-at', '--format', '--sort'],
+    longFlags: ['--delete', '--move', '--copy', '--force', '--remotes', '--all', '--list', '--verbose', '--quiet', '--ignore-case',
+      '--track', '--no-track', '--unset-upstream', '--edit-description', '--show-current', '--create-reflog', '--no-create-reflog',
+      '--contains', '--no-contains', '--merged', '--no-merged', '--color', '--no-color', '--column', '--no-column', '--abbrev',
+      '--no-abbrev', '--omit-empty', '--recurse-submodules'],
+  },
+  clean: {
+    shortValue: 'e', shortFlags: 'dfinqxX',
+    longValue: ['--exclude'],
+    longFlags: ['--force', '--interactive', '--dry-run', '--quiet'],
+  },
+  checkout: {
+    shortValue: 'bB', shortFlags: 'qfmplt',
+    longValue: ['--orphan', '--pathspec-from-file'],
+    longFlags: ['--quiet', '--force', '--merge', '--patch', '--track', '--no-track', '--detach', '--ours', '--theirs', '--conflict',
+      '--ignore-skip-worktree-bits', '--ignore-other-worktrees', '--overwrite-ignore', '--no-overwrite-ignore', '--recurse-submodules',
+      '--no-recurse-submodules', '--overlay', '--no-overlay', '--pathspec-file-nul', '--progress', '--no-progress', '--guess', '--no-guess'],
+  },
+  switch: {
+    shortValue: 'cC', shortFlags: 'dfmqt',
+    longValue: ['--create', '--force-create', '--orphan'],
+    longFlags: ['--detach', '--discard-changes', '--force', '--merge', '--conflict', '--quiet', '--progress', '--no-progress',
+      '--track', '--no-track', '--guess', '--no-guess', '--ignore-other-worktrees', '--recurse-submodules', '--no-recurse-submodules'],
+  },
+  restore: {
+    shortValue: 's', shortFlags: 'SWpqm',
+    longValue: ['--source', '--pathspec-from-file'],
+    longFlags: ['--staged', '--worktree', '--patch', '--quiet', '--progress', '--no-progress', '--ours', '--theirs', '--merge',
+      '--conflict', '--ignore-unmerged', '--ignore-skip-worktree-bits', '--recurse-submodules', '--no-recurse-submodules', '--overlay',
+      '--no-overlay', '--pathspec-file-nul'],
+  },
+  commit: {
+    shortValue: 'mFCct', shortOptional: 'Su', shortFlags: 'apnsveioqz',
+    longValue: ['--message', '--file', '--reuse-message', '--reedit-message', '--fixup', '--squash', '--author', '--date',
+      '--template', '--trailer', '--cleanup', '--pathspec-from-file'],
+    longFlags: ['--all', '--patch', '--amend', '--no-edit', '--edit', '--signoff', '--no-signoff', '--no-verify', '--verify',
+      '--allow-empty', '--allow-empty-message', '--include', '--only', '--short', '--branch', '--porcelain', '--long', '--null',
+      '--dry-run', '--status', '--no-status', '--verbose', '--quiet', '--reset-author', '--no-post-rewrite', '--pathspec-file-nul',
+      '--untracked-files', '--gpg-sign', '--no-gpg-sign'],
+  },
+  rm: {
+    shortFlags: 'frnq',
+    longValue: ['--pathspec-from-file'],
+    longFlags: ['--force', '--dry-run', '--cached', '--ignore-unmatch', '--quiet', '--sparse', '--pathspec-file-nul'],
+  },
+  'update-ref': { shortValue: 'm', shortFlags: 'dz', longFlags: ['--no-deref', '--create-reflog', '--stdin'] },
+  gc: { shortFlags: 'q', longFlags: ['--aggressive', '--auto', '--quiet', '--force', '--keep-largest-pack', '--cruft', '--no-cruft', '--prune', '--no-prune'] },
+};
 
-/** Options before a lone "--"; everything after it is a path. @param {string[]} args */
-function beforeDashes(args) {
-  const i = args.indexOf('--');
-  return i === -1 ? args : args.slice(0, i);
+/**
+ * Walk a subcommand's arguments the way git parses them.
+ * @param {string[]} args
+ * @param {Spec} spec
+ * @returns {{ longs: string[], shorts: string, valued: string, positional: string[], paths: string[], bad: string | null }}
+ */
+function walk(args, spec) {
+  const longs = [];
+  let shorts = '';
+  let valued = '';
+  const positional = [];
+  let paths = [];
+  /** @type {string | null} */
+  let bad = null;
+  const known = [...(spec.longValue ?? []), ...(spec.longFlags ?? [])];
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k];
+    if (a === '--') {
+      paths = args.slice(k + 1);
+      break;
+    }
+    if (a.startsWith('--')) {
+      const name = a.split('=')[0];
+      longs.push(name);
+      if (!a.includes('=')) {
+        // git accepts an unambiguous prefix; only an option that needs a value takes the next word.
+        const matches = known.filter((n) => n.startsWith(name));
+        const resolved = known.includes(name) ? name : matches.length === 1 ? matches[0] : null;
+        if (resolved && spec.longValue?.includes(resolved)) k++;
+      }
+      continue;
+    }
+    if (a.length > 1 && a.startsWith('-')) {
+      for (let j = 1; j < a.length; j++) {
+        const c = a[j];
+        if (spec.shortValue?.includes(c)) {
+          valued += c;
+          if (j === a.length - 1) k++; // the value is the next word; otherwise it's the rest of this one
+          break;
+        }
+        if (spec.shortOptional?.includes(c)) break; // its value, if any, is the rest of this word
+        if (!spec.shortFlags?.includes(c)) {
+          bad = a; // a letter the guard doesn't know could take a value and change how the rest reads
+          break;
+        }
+        shorts += c;
+      }
+      continue;
+    }
+    positional.push(a);
+  }
+  return { longs, shorts, valued, positional, paths, bad };
 }
 
 /**
- * A long option, matched the way git matches it: the full name, "name=value", or any abbreviation
- * git would accept (git takes an unambiguous prefix, so --forc is --force). An ambiguous prefix
- * also counts: git refuses to run it, so treating it as the dangerous option costs nothing.
- * @param {string[]} opts @param {...string} names
+ * A long option as git matches it: the full name, or any prefix of it (git accepts an unambiguous
+ * prefix, so --forc is --force; an ambiguous one makes git refuse to run, so counting it costs nothing).
+ * @param {string[]} longs @param {...string} names
  */
-const hasLong = (opts, ...names) => opts.some((a) => {
-  if (!a.startsWith('--') || a === '--') return false;
-  const name = a.split('=')[0];
-  return names.some((n) => name === n || (name.length > 2 && n.startsWith(name)));
-});
-
-/** A short option, alone or in a cluster such as -fd. Case matters: -d and -D differ. @param {string[]} opts @param {string} ch */
-const hasShort = (opts, ch) => opts.some((a) => /^-[A-Za-z]+$/.test(a) && a.slice(1).includes(ch));
-
-/** @param {string} rule @param {string} shown @param {string} why @param {string} instead @returns {Block} */
-const block = (rule, shown, why, instead) => ({ rule, shown, why, instead });
-
-const UNSEEN = (what) => block('cannot-see', what,
-  "the guard can't see what it would actually run, so it won't guess",
-  'write the command out in full, with no shell variables or encoded parts');
+const hasLong = (longs, ...names) => longs.some((name) => names.some((n) => name === n || (name.length > 2 && n.startsWith(name))));
 
 /**
  * The verdict on one git command (the words after "git").
  * @param {Word[]} argWords
  * @param {Required<Context>} ctx
- * @param {number} depth alias expansion depth
  * @returns {Block | null}
  */
-function checkGit(argWords, ctx, depth = 0) {
+function checkGit(argWords, ctx) {
+  for (const w of argWords) {
+    if (w.dollar) return unreadable('git with a shell variable');
+    if (w.escape) return unreadable('git with a backslash escape');
+  }
   const args = argWords.map((w) => w.text);
-  const unknown = (w) => w.unq || hasBraceExpansion(w.raw);
-  const VARIABLE = UNSEEN('git with a shell variable');
 
-  // Words whose text the guard can't know fail closed. Before the subcommand, only the value of git's
-  // own -C, --git-dir or --work-tree may be a quoted expansion.
-  let s = 0;
-  while (s < argWords.length && args[s].startsWith('-')) {
-    const w = argWords[s];
-    if (unknown(w) || (w.dq && !PATH_ATTACHED.test(w.text))) return VARIABLE;
-    if (GIT_OPTIONS_WITH_VALUE.has(args[s])) {
-      const v = argWords[s + 1];
-      if (v && (unknown(v) || (v.dq && !PATH_OPTIONS.has(args[s])))) return VARIABLE;
-      s += 2;
-    } else s += 1;
-  }
-  // The subcommand, and what follows it: a quoted expansion only as a message on commit, tag or merge.
-  for (let k = s; k < argWords.length; k++) {
-    const w = argWords[k];
-    if (unknown(w)) return VARIABLE;
-    if (w.dq) {
-      const isMessage = k > s && MESSAGE_SUBCOMMANDS.has(args[s])
-        && (MESSAGE_OPTION.test(args[k - 1]) || MESSAGE_ATTACHED.test(w.text));
-      if (!isMessage) return VARIABLE;
-    }
-  }
-
+  // git's own options, before the subcommand.
   let i = 0;
   while (i < args.length && args[i].startsWith('-')) {
     const opt = args[i];
-    if (opt === '-c' && /^alias\./i.test(args[i + 1] ?? '')) {
-      const value = (args[i + 1] ?? '').split('=').slice(1).join('=');
-      const inner = checkAliasValue(value, ctx, depth);
-      if (inner) return inner;
+    const name = opt.split('=')[0];
+    if (name === '-c' || name === '--config-env') {
+      const kv = opt === '-c' ? args[i + 1] ?? '' : '';
+      if (name === '--config-env' || !SAFE_CONFIG.test(kv.split('=')[0])) return unreadable(`git -c ${kv.split('=')[0] || '...'}`);
     }
-    if (opt.startsWith('--config-env') && /alias\./i.test(opt.includes('=') ? opt : args[i + 1] ?? '')) return UNSEEN('git --config-env alias');
-    i += GIT_OPTIONS_WITH_VALUE.has(opt) ? 2 : 1;
+    if (GIT_GLOBAL_VALUE.has(opt)) i += 2;
+    else if (GIT_GLOBAL_VALUE.has(name) || GIT_GLOBAL_FLAG.has(opt)) i += 1;
+    else return unreadable(`git ${opt}`);
   }
   const sub = args[i];
-  const rest = args.slice(i + 1);
-  const opts = beforeDashes(rest);
-  const positional = opts.filter((a) => !a.startsWith('-'));
   if (sub === undefined) return null;
-
-  // An alias runs whatever it stands for: look it up and check that instead.
-  if (!BUILTINS.has(sub) && depth < 5) {
-    const value = ctx.alias(sub);
-    if (value !== null) return checkAliasValue(value, ctx, depth, rest);
+  const rest = args.slice(i + 1);
+  if (sub === 'filter-repo') {
+    return block('rewrite-history', 'git filter-repo', "it rewrites the project's whole history", 'leave history alone; ask someone who maintains the repository');
+  }
+  if (!BUILTINS.has(sub)) {
+    // An alias runs whatever it stands for; external git-foo programs are someone else's.
+    return ctx.alias(sub) !== null ? unreadable(`git ${sub} (an alias)`) : null;
   }
 
+  const spec = SPECS[sub];
+  const o = spec ? walk(rest, spec) : null;
+  if (o?.bad) return unreadable(`git ${sub} ${o.bad}`);
+  const flag = (c) => Boolean(o?.shorts.includes(c));
+  const long = (...names) => Boolean(o && hasLong(o.longs, ...names));
+
   switch (sub) {
-    case 'push': {
-      if (hasLong(opts, '--force', '--force-with-lease', '--force-if-includes') || hasShort(opts, 'f') || positional.some((a) => a.startsWith('+'))) {
+    case 'push':
+      if (long('--force', '--force-with-lease', '--force-if-includes') || flag('f') || o.positional.some((a) => a.startsWith('+'))) {
         return block('force-push', 'git push --force',
           'a force push replaces the branch on GitHub with yours, and whatever it replaces is gone for everyone who uses it',
           'pull first (git pull), fix any conflicts, then push normally');
       }
-      if (hasLong(opts, '--delete', '--prune', '--mirror') || hasShort(opts, 'd') || positional.slice(1).some((a) => a.startsWith(':'))) {
+      if (long('--delete', '--prune', '--mirror') || flag('d') || o.positional.slice(1).some((a) => a.startsWith(':'))) {
         return block('remote-delete', 'git push --delete',
           'it deletes branches on GitHub, and a deleted branch there takes its unmerged commits with it',
           'leave the branch; GitHub offers to delete it for you after the pull request merges');
       }
       return null;
-    }
     case 'reset':
-      if (hasLong(opts, '--hard', '--merge')) {
+      if (long('--hard', '--merge')) {
         return block('reset-hard', 'git reset --hard',
           "it throws away every change you haven't committed, and git can't bring those changes back",
           'git stash sets your changes aside, and git stash pop brings them back');
       }
       return null;
     case 'branch':
-      if (hasShort(opts, 'D') || (hasLong(opts, '--delete') || hasShort(opts, 'd')) && (hasLong(opts, '--force') || hasShort(opts, 'f'))) {
+      if (flag('D') || (long('--delete') || flag('d')) && (long('--force') || flag('f'))) {
         return block('branch-force-delete', 'git branch -D',
           "it deletes a branch even when its commits aren't merged anywhere, so that work can be lost",
           'git branch -d deletes it only once its work is merged, and says so if it is not');
       }
-      if (hasShort(opts, 'M') || hasShort(opts, 'C') || hasLong(opts, '--force') || hasShort(opts, 'f')) {
+      if (flag('M') || flag('C') || long('--force') || flag('f')) {
         return block('branch-force', 'git branch --force',
           'it overwrites an existing branch, and the commits that branch pointed to can be lost',
           'pick a new branch name instead of reusing one that exists');
       }
       return null;
     case 'clean':
-      if ((hasLong(opts, '--force') || hasShort(opts, 'f')) && !(hasLong(opts, '--dry-run') || hasShort(opts, 'n'))) {
+      if ((long('--force') || flag('f')) && !(long('--dry-run') || flag('n'))) {
         return block('clean', 'git clean -f',
           "it deletes files git isn't tracking, and since they were never committed, git can't bring them back",
           'git clean -n lists what would go, so you can delete only what you mean to by hand');
       }
       return null;
     case 'checkout': {
-      if (hasLong(opts, '--force') || hasShort(opts, 'f')) {
+      if (long('--force') || flag('f')) {
         return block('checkout-force', 'git checkout --force',
           "it switches branches by throwing away changes you haven't committed",
           'commit or git stash your changes first, then switch');
       }
-      if (hasShort(opts, 'B')) {
+      if (o.valued.includes('B')) {
         return block('checkout-reset-branch', 'git checkout -B',
           'it resets a branch that already exists, and its commits can be lost',
           'git switch -c with a new branch name');
       }
-      const paths = rest.includes('--') ? rest.slice(rest.indexOf('--') + 1) : [];
-      // Values of -b / --orphan are branch names, not paths.
-      const words = [];
-      for (let k = 0; k < opts.length; k++) {
-        if (['-b', '--orphan'].includes(opts[k])) k++;
-        else if (!opts[k].startsWith('-')) words.push(opts[k]);
-      }
-      const discards = paths.length > 0 || words.length > 1 || words.includes('.')
+      const words = o.positional;
+      const discards = o.paths.length > 0 || words.length > 1 || words.includes('.')
         || (words.length === 1 && !ctx.isRef(words[0]) && ctx.isPath(words[0]));
       if (discards) {
         return block('checkout-files', 'git checkout -- <file>',
@@ -434,126 +477,139 @@ function checkGit(argWords, ctx, depth = 0) {
       }
       return null;
     }
-    case 'restore': {
-      const staged = hasLong(opts, '--staged') || hasShort(opts, 'S');
-      const worktree = hasLong(opts, '--worktree') || hasShort(opts, 'W');
-      if (!staged || worktree) {
+    case 'restore':
+      if (!(long('--staged') || flag('S')) || long('--worktree') || flag('W')) {
         return block('restore', 'git restore <file>',
           "it replaces your files with the last committed version, and changes you haven't committed are gone for good",
           'git restore --staged <file> only unstages a file; git stash sets changes aside and git stash pop brings them back');
       }
       return null;
-    }
     case 'switch':
-      if (hasLong(opts, '--discard-changes', '--force') || hasShort(opts, 'f')) {
+      if (long('--discard-changes', '--force') || flag('f')) {
         return block('switch-discard', 'git switch --discard-changes',
           "it switches branches by throwing away changes you haven't committed",
           'commit or git stash your changes first, then switch');
       }
-      if (hasShort(opts, 'C') || hasLong(opts, '--force-create')) {
+      if (o.valued.includes('C') || long('--force-create')) {
         return block('switch-force-create', 'git switch -C',
           'it resets a branch that already exists, and its commits can be lost',
           'git switch -c with a new branch name');
       }
       return null;
-    case 'stash':
-      if (['drop', 'clear'].includes(rest[0])) {
-        return block('stash-drop', `git stash ${rest[0]}`,
+    case 'stash': {
+      const action = rest.find((a) => !a.startsWith('-'));
+      if (action === 'drop' || action === 'clear') {
+        return block('stash-drop', `git stash ${action}`,
           'it deletes stashed changes, and git keeps no easy way back to them',
           'leave the stash where it is; git stash list shows what is in it');
       }
       return null;
+    }
     case 'rebase':
-      if (hasLong(opts, '--abort', '--quit')) return null;
+      // Only a bare --abort or --quit (or an abbreviation of one) is let through.
+      if (rest.length === 1 && hasLong(rest, '--abort', '--quit') && !hasLong(rest, '--autosquash', '--autostash')) return null;
       return block('rebase', 'git rebase',
         'it rewrites the commits on your branch, which confuses anyone who already has them',
         'git merge main brings main into your branch without rewriting anything');
     case 'commit':
-      if (hasLong(opts, '--amend')) {
+      if (long('--amend')) {
         return block('amend', 'git commit --amend',
           'it rewrites your last commit, and if that commit is already pushed, only a force push can follow',
           'make a new commit with the fix; history stays as it was');
       }
       return null;
     case 'rm':
-      if (hasLong(opts, '--force') || hasShort(opts, 'f')) {
+      if (long('--force') || flag('f')) {
         return block('rm-force', 'git rm --force',
           "it deletes files even when they have changes you haven't committed",
           'commit or git stash your changes first, then git rm without --force');
       }
       return null;
     case 'filter-branch':
-    case 'filter-repo':
-      return block('rewrite-history', `git ${sub}`,
-        "it rewrites the project's whole history",
-        'leave history alone; ask someone who maintains the repository');
-    case 'reflog':
-      if (['expire', 'delete'].includes(rest[0])) {
-        return block('reflog-expire', `git reflog ${rest[0]}`,
+      return block('rewrite-history', 'git filter-branch', "it rewrites the project's whole history", 'leave history alone; ask someone who maintains the repository');
+    case 'reflog': {
+      const action = rest.find((a) => !a.startsWith('-'));
+      if (action === 'expire' || action === 'delete') {
+        return block('reflog-expire', `git reflog ${action}`,
           "it erases git's record of where your branches have been, which is how lost work gets found again",
           'leave the reflog alone; it costs nothing to keep');
       }
       return null;
+    }
     case 'gc':
     case 'prune':
-      if (sub === 'prune' || opts.some((a) => /^--pr(u(ne?)?)?=(now|all)$/.test(a))) {
+      if (sub === 'prune' || o.longs.some((n, k) => hasLong([n], '--prune') && /=(now|all)$/i.test(rest.find((a) => a.startsWith(n)) ?? ''))) {
         return block('prune-now', `git ${sub}`,
           "it deletes commits that nothing points to right now, and those are exactly the ones you'd want back after a mistake",
           'leave it; git cleans up on its own, after a safe delay');
       }
       return null;
     case 'update-ref':
-      if (hasShort(opts, 'd')) {
+      if (flag('d')) {
         return block('update-ref-delete', 'git update-ref -d',
           'it deletes a branch or tag directly, without any of the checks git branch -d makes',
           'git branch -d, which only deletes merged work');
       }
       return null;
     case 'worktree':
-      if (rest[0] === 'remove' && (hasLong(opts, '--force') || hasShort(opts, 'f'))) {
+      if (rest[0] === 'remove' && rest.slice(1).some((a) => a === '-f' || hasLong([a.split('=')[0]], '--force'))) {
         return block('worktree-force', 'git worktree remove --force',
           "it deletes a working copy even when it has changes you haven't committed",
           'commit or git stash in that working copy first, then remove it without --force');
       }
       return null;
     case 'config': {
-      // Defining an alias that would run a blocked command is the same as running it later.
-      const k = args.findIndex((a, n) => n > i && /^alias\./i.test(a));
-      if (k !== -1 && args[k + 1] !== undefined) return checkAliasValue(args[k + 1], ctx, depth);
+      // Reading settings is fine. Writing one that can make git run a program is refused.
+      const plain = rest.filter((a) => !a.startsWith('-'));
+      const writes = rest.some((a) => hasLong([a.split('=')[0]], '--add', '--replace-all')) || plain[0] === 'set' || plain.length >= 2;
+      const key = plain[0] === 'set' ? plain[1] : plain[0];
+      if (writes && key && !SAFE_CONFIG.test(key)) return unreadable(`git config ${key}`);
       return null;
     }
+    case 'submodule':
+      return rest.includes('foreach') ? unreadable('git submodule foreach') : null;
+    case 'bisect':
+      return rest[0] === 'run' ? unreadable('git bisect run') : null;
+    case 'difftool':
+      return rest.some((a) => a === '-x' || hasLong([a.split('=')[0]], '--extcmd')) ? unreadable('git difftool --extcmd') : null;
     default:
       return null;
   }
 }
 
-/**
- * An alias's value, checked as what it runs: "!cmd" is a shell command, anything else is git arguments.
- * @param {string} value @param {Required<Context>} ctx @param {number} depth @param {string[]} [more]
- */
-function checkAliasValue(value, ctx, depth, more = []) {
-  if (value.startsWith('!')) return checkLine(`${value.slice(1)} ${more.join(' ')}`, ctx);
-  /** @type {Word[][]} */
-  const out = [];
-  parse(value, 0, false, out);
-  const words = (out[0] ?? []).concat(more.map((text) => ({ text, raw: text, dq: false, unq: false })));
-  return checkGit(words, ctx, depth + 1);
-}
+// ---------------------------------------------------------------------------------------------
+// One command, one line
+// ---------------------------------------------------------------------------------------------
 
 /**
- * The verdict on one command line.
- * @param {string} line @param {Required<Context>} ctx
- * @returns {Block | null}
+ * Strip the wrappers the guard can read exactly: sudo, command, exec and nohup with no options,
+ * timeout with just a duration, nice with no options or -n N.
+ * @param {Word[]} w
+ * @returns {{ rest: Word[], wrapped: boolean } | { refused: Block }}
  */
-function checkLine(line, ctx) {
-  /** @type {Word[][]} */
-  const commands = [];
-  parse(line, 0, false, commands);
-  for (const command of commands) {
-    const found = checkCommand(command, ctx);
-    if (found) return found;
+function stripWrappers(w) {
+  let wrapped = false;
+  for (;;) {
+    const p = w.length ? program(w[0].text) : '';
+    const next = w[1]?.text ?? '';
+    if (['sudo', 'exec', 'nohup'].includes(p)) {
+      if (next.startsWith('-')) return { refused: unreadable(`${p} ${next}`) };
+      w = w.slice(1);
+    } else if (p === 'command') {
+      if (/^-[vV]$/.test(next)) return { rest: [], wrapped: false }; // command -v only looks a name up
+      if (next.startsWith('-')) return { refused: unreadable(`command ${next}`) };
+      w = w.slice(1);
+    } else if (p === 'timeout') {
+      if (!/^\d+(\.\d+)?[smhd]?$/.test(next)) return { refused: unreadable(`timeout ${next}`) };
+      w = w.slice(2);
+    } else if (p === 'nice') {
+      if (next === '-n' && /^-?\d+$/.test(w[2]?.text ?? '')) w = w.slice(3);
+      else if (next.startsWith('-')) return { refused: unreadable(`nice ${next}`) };
+      else w = w.slice(1);
+    } else break;
+    wrapped = true;
   }
-  return null;
+  return { rest: w, wrapped };
 }
 
 /**
@@ -562,115 +618,58 @@ function checkLine(line, ctx) {
  * @returns {Block | null}
  */
 function checkCommand(command, ctx) {
+  // NAME=value in front of a command. In front of git it's refused: a variable can make git run a program.
   let w = command;
-  // Leading NAME=value assignments, then wrappers like sudo, env, timeout and xargs.
-  for (;;) {
-    if (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0].text)) {
-      if (/^GIT_CONFIG/i.test(w[0].text)) return UNSEEN('git with config from the environment');
-      w = w.slice(1);
-      continue;
-    }
-    const prog = w.length ? program(w[0].text) : '';
-    if (!WRAPPERS.has(prog)) break;
-    const withValue = WRAPPERS.get(prog) ?? [];
-    let k = 1;
-    while (k < w.length && (w[k].text.startsWith('-') || (prog === 'env' && w[k].text.includes('=')))) {
-      const a = w[k].text;
-      if (prog === 'env' && /^GIT_CONFIG/i.test(a)) return UNSEEN('git with config from the environment');
-      // env -S "git push --force" carries the whole command in one value: check it with the words after it.
-      const split = prog === 'env' && (a === '-S' || a === '--split-string' ? w[k + 1]?.text ?? ''
-        : /^-S./.test(a) ? a.slice(2) : a.startsWith('--split-string=') ? a.slice('--split-string='.length) : null);
-      if (split !== null && split !== false) {
-        const after = w.slice(a === '-S' || a === '--split-string' ? k + 2 : k + 1).map((x) => JSON.stringify(x.text));
-        return checkLine([split, ...after].join(' '), ctx);
-      }
-      if (a === '--') { k++; break; }
-      k += withValue.includes(a) ? 2 : 1;
-    }
-    if (prog === 'timeout' && k < w.length) k++; // the duration
-    if (prog === 'xargs') {
-      // xargs builds the rest of the command from its input, which the guard can't see. What's written
-      // out is checked as usual; a risky program whose arguments come from input is refused.
-      const inner = w.slice(k);
-      const target = inner.length ? program(inner[0].text) : '';
-      const written = inner.length ? checkCommand(inner, ctx) : null;
-      if (written) return written;
-      if (XARGS_RISKY.has(target)) return UNSEEN(`xargs running ${target}`);
-      return null;
-    }
-    w = w.slice(k);
+  let assigned = false;
+  while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0].text)) {
+    w = w.slice(1);
+    assigned = true;
   }
+  const stripped = stripWrappers(w);
+  if ('refused' in stripped) return stripped.refused;
+  w = stripped.rest;
   if (!w.length) return null;
+  if (w[0].dollar || w[0].escape) return unreadable('a command named by a variable');
   const prog = program(w[0].text);
   const args = w.slice(1);
   const texts = args.map((a) => a.text);
 
-  if (prog === 'git') return checkGit(args, ctx);
-  if (prog === 'gh' && texts[0] === 'repo' && texts[1] === 'delete') {
-    return block('repo-delete', 'gh repo delete', 'it deletes the whole repository on GitHub', 'archive it on GitHub instead, which can be undone');
+  if (prog === 'git') return assigned ? unreadable('git with variables set in front of it') : checkGit(args, ctx);
+  if (prog === 'gh') {
+    if (texts[0] === 'repo' && texts[1] === 'delete') {
+      return block('repo-delete', 'gh repo delete', 'it deletes the whole repository on GitHub', 'archive it on GitHub instead, which can be undone');
+    }
+    return null;
   }
-  if (['rm', 'rmdir', 'rd', 'del', 'remove-item', 'ri', 'erase'].includes(prog) && texts.some((a) => /(^|[\\/])\.git[\\/]?$/.test(a))) {
-    return block('delete-dot-git', 'rm -rf .git', "it deletes the .git folder, which is the project's entire history", 'leave .git alone; ask for help with whatever you were trying to undo');
+  if (RM.has(prog)) {
+    if (texts.some((a) => /(^|[\\/])\.git[\\/]?$/.test(a))) {
+      return block('delete-dot-git', 'rm -rf .git', "it deletes the .git folder, which is the project's entire history", 'leave .git alone; ask for help with whatever you were trying to undo');
+    }
+    return null;
   }
-  // Commands that run a string as a command.
-  if (['eval', 'invoke-expression', 'iex'].includes(prog)) return checkLine(texts.join(' '), ctx);
-  if (POSIX_SHELLS.has(prog)) return checkPosixShell(texts, ctx);
-  if (POWERSHELLS.has(prog)) return checkPowerShell(texts, ctx);
-  if (prog === 'cmd') {
-    const k = texts.findIndex((a) => /^\/[ck]$/i.test(a));
-    return k === -1 ? UNSEEN('cmd reading commands from input') : checkLine(texts.slice(k + 1).join(' '), ctx);
+  if (stripped.wrapped) return unreadable(`${prog} after a wrapper`);
+  if (CARRIERS.has(prog)) return unreadable(prog);
+  if (prog === 'export' || prog === 'declare' || prog === 'typeset') {
+    if (texts.some((a) => RISKY_VARIABLE.test(a.split('=')[0]))) return unreadable(`${prog} ${texts.join(' ')}`);
+    return null;
   }
-  if (['start-process', 'saps', 'start'].includes(prog)) {
-    const parts = texts.filter((a) => !a.startsWith('-')).flatMap((a) => a.split(',')).filter(Boolean);
-    if (parts.length && program(parts[0]) === 'git') return checkLine(parts.map((p) => JSON.stringify(p)).join(' '), ctx);
+  if (prog === 'find' && texts.some((a) => /^-(exec|execdir|ok|okdir)$/.test(a))) return unreadable('find -exec');
+  if (INLINE_CODE.has(prog) && texts.some((a) => INLINE_CODE.get(prog)?.test(a))) return unreadable(`${prog} running inline code`);
+  if (SHELLS.has(prog) || prog === 'source' || prog === '.') {
+    // A shell may run a script file; a shell given a string, or reading from input, runs something unseen.
+    const first = texts[0];
+    const fromInput = first === undefined || first === '-' || /^[-+]/.test(first) || /^\d*</.test(first)
+      || /^\/(dev\/(stdin|fd\/\d+)|proc\/self\/fd\/\d+)$/.test(first) || texts.includes('<<<');
+    return fromInput ? unreadable(`${prog} ${first ?? ''}`.trim()) : null;
+  }
+  if (POWERSHELLS.has(prog)) {
+    const k = texts.findIndex((a) => /^-f(i(le?)?)?$/i.test(a));
+    const before = k === -1 ? texts : texts.slice(0, k);
+    const plainFlags = before.every((a, n) => /^-(noprofile|nologo|noninteractive|nop|nol|noni)$/i.test(a)
+      || (/^-(executionpolicy|ep|ex)$/i.test(a)) || /^-(executionpolicy|ep|ex)$/i.test(before[n - 1] ?? ''));
+    return k !== -1 && plainFlags && texts[k + 1] && texts[k + 1] !== '-' ? null : unreadable(`${prog} ${texts[0] ?? ''}`.trim());
   }
   return null;
-}
-
-/**
- * bash -c "...", sh -euc '...', bash <<< "...": check the string the shell will run. A shell reading
- * commands from stdin (a pipe or a redirect) runs something the guard can't see.
- * @param {string[]} args @param {Required<Context>} ctx
- */
-function checkPosixShell(args, ctx) {
-  let runsString = false;
-  /** @type {string | null} */
-  let script = null;
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (a === '<<<' && args[k + 1] !== undefined) return checkLine(args[k + 1], ctx);
-    if (/^\d*<(?!<<)/.test(a) || /^-[A-Za-z]*s[A-Za-z]*$/.test(a) && !a.includes('c')) return UNSEEN('a shell reading commands from input');
-    if (/^[-+][oO]$/.test(a)) { k++; continue; }
-    if (/^--(rcfile|init-file)$/.test(a)) { k++; continue; }
-    if (/^-[A-Za-z]*c[A-Za-z]*$/.test(a)) { runsString = true; continue; }
-    if (a.startsWith('-') || a.startsWith('+')) continue;
-    if (runsString) return checkLine(a, ctx);
-    script = a;
-    break;
-  }
-  if (runsString) return null; // -c with nothing after it: the shell errors out
-  if (script === null) return UNSEEN('a shell reading commands from input');
-  return null; // a script file: see README, "What it isn't"
-}
-
-/**
- * powershell -Command "...", with any abbreviation of -Command; -EncodedCommand can't be read, so it's refused.
- * @param {string[]} args @param {Required<Context>} ctx
- */
-function checkPowerShell(args, ctx) {
-  const isPrefixOf = (a, full, min) => a.length >= min && full.startsWith(a.toLowerCase());
-  for (let k = 0; k < args.length; k++) {
-    const a = args[k];
-    if (/^-ec$/i.test(a) || isPrefixOf(a, '-encodedcommand', 2) || isPrefixOf(a, '-encodedarguments', 9)) return UNSEEN('an encoded PowerShell command');
-    if (isPrefixOf(a, '-command', 2)) {
-      const rest = args.slice(k + 1);
-      if (!rest.length || rest[0] === '-') return UNSEEN('PowerShell reading commands from input');
-      return checkLine(rest.join(' '), ctx);
-    }
-    if (isPrefixOf(a, '-file', 2)) return args[k + 1] === '-' ? UNSEEN('PowerShell reading commands from input') : null;
-    if (!a.startsWith('-')) return checkLine(args.slice(k).join(' '), ctx); // powershell "git ..." runs it as a command
-  }
-  return args.length ? null : UNSEEN('PowerShell reading commands from input');
 }
 
 /**
@@ -688,7 +687,13 @@ export function check(line, context = {}) {
     isPath: context.isPath ?? ((name) => existsSync(resolve(cwd, name))),
     alias: context.alias ?? ((name) => gitOut(cwd, ['config', '--get', `alias.${name}`])),
   };
-  return checkLine(line, ctx);
+  const { commands, unreadable: why } = parse(line);
+  if (why) return unreadable(why);
+  for (const command of commands) {
+    const found = checkCommand(command, ctx);
+    if (found) return found;
+  }
+  return null;
 }
 
 /** @param {string} cwd @param {string[]} args */

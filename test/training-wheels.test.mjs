@@ -16,44 +16,37 @@ const ctx = {
   alias: (name) => ALIASES[name] ?? null,
 };
 
+// Plain git commands get the specific reason.
 const BLOCKED = {
-  'force-push': ['git push --force', 'git push -f origin main', 'git push origin main --force', 'git push -uf origin feature',
-    'git push --force-with-lease', 'git push origin +main', 'FOO=1 git push -f',
-    '"C:\\Program Files\\Git\\cmd\\git.exe" push -f', '/usr/bin/git push --force',
+  'force-push': ['git push --force', 'git push -f origin main', 'git push origin main --force', 'git push -uf origin feature', 'git push -fq',
+    'git push --force-with-lease', 'git push origin +main', '"C:\\Program Files\\Git\\cmd\\git.exe" push -f', '/usr/bin/git push --force',
     // git accepts any unambiguous abbreviation of a long option
     'git push --forc', 'git push --force-with-lea', 'git push --fo origin main',
-    // quoting that a shell removes
-    "git push $'--force'", "git push $'\\x2d\\x2dforce'", 'git push --for"ce"', 'git push --for\\ce', "git push '--force'",
-    // shells, wrappers and aliases that run git for you
-    'bash -xc "git push --force"', 'sh -c "git status && git push -f"', 'powershell -Comm "git push --force"', 'pwsh -Com "git push --force"',
-    'powershell -NoProfile "git push --force"', 'eval "git push --force"', 'timeout 30 git push --force', 'nice -n 5 git push -f',
-    'Start-Process git -ArgumentList "push","--force"', 'git yolo', 'git -c alias.p="push --force" p', 'git config alias.yolo "push --force"',
-    'git config --global alias.yolo "!git push --force"',
-    // env -S carries a whole command in one value
-    'env -S "git push --force"', 'env -S"git push" --force', 'env -i -S "git -C . push -f"'],
+    // quotes the shell removes
+    'git push --for"ce"', "git push '--force'",
+    // the wrappers the guard strips exactly
+    'sudo git push -f', 'timeout 30 git push --force', 'nice -n 5 git push -f', 'nice git push -f', 'nohup git push --force', 'exec git push -f',
+    'command git push -f'],
   'remote-delete': ['git push --delete origin old', 'git push origin :old', 'git push -d origin old', 'git push --mirror', 'git push --prune origin',
     'git push --del origin old'],
   'reset-hard': ['git reset --hard', 'git reset --hard HEAD~1', 'git -C ../repo reset --hard', 'cd repo && git reset --hard origin/main',
-    'git -c core.pager=cat reset --hard', 'git reset --har',
-    'bash -c "git reset --hard"', 'powershell -Command "git status; git reset --hard"', 'cmd /c git reset --hard', 'cmd /C "git reset --hard"',
-    'sh -euc "git reset --hard"', 'bash -o pipefail -c "git reset --hard"', 'iex "git reset --hard"', 'Invoke-Expression "git reset --hard"',
-    'bash <<< "git reset --hard"', 'git nuke', 'env -i git reset --hard', 'git -C "$HOME/repo" reset --hard',
-    'env --split-string="git reset --hard"'],
-  'branch-force-delete': ['git branch -D feature', 'git branch --delete --force feature', 'git branch -df feature',
-    'echo feature | xargs git branch -D', 'xargs -I {} git branch -D {}'],
+    'git -c color.ui=never reset --hard', 'git reset --har', '(git reset --hard)', 'git --no-pager reset -q --hard'],
+  'branch-force-delete': ['git branch -D feature', 'git branch --delete --force feature', 'git branch -df feature'],
   'branch-force': ['git branch -f feature main', 'git branch -M feature', 'git branch -C feature copy', 'git branch --forc feature main'],
-  clean: ['git clean -f', 'git clean -fd', 'git clean -xdf', 'sudo git clean --force', 'sudo -u bob git clean -f'],
+  clean: ['git clean -f', 'git clean -fd', 'git clean -xdf', 'sudo git clean --force'],
   'checkout-files': ['git checkout -- notes.txt', 'git checkout .', 'git checkout notes.txt', 'git checkout HEAD notes.txt',
     'git checkout main -- src/app.js'],
   'checkout-force': ['git checkout -f main', 'git checkout --force feature'],
-  'checkout-reset-branch': ['git checkout -B feature'],
+  'checkout-reset-branch': ['git checkout -B feature', 'git checkout -qB feature'],
   restore: ['git restore notes.txt', 'git restore .', 'git restore --worktree --staged notes.txt', 'git restore -SW notes.txt',
-    'git restore --source=HEAD~1 notes.txt'],
+    'git restore --source=HEAD~1 notes.txt', 'git restore -s HEAD notes.txt'],
   'switch-discard': ['git switch --discard-changes main', 'git switch -f main', 'git switch --discard main'],
-  'switch-force-create': ['git switch -C feature'],
+  'switch-force-create': ['git switch -C feature', 'git switch --force-c feature'],
   'stash-drop': ['git stash drop', 'git stash clear'],
-  rebase: ['git rebase main', 'git rebase -i HEAD~3', 'git pull --rebase=false && git rebase origin/main'],
-  amend: ['git commit --amend -m "better message"', 'git commit --amend --no-edit', 'git commit --am -m "x"'],
+  rebase: ['git rebase main', 'git rebase -i HEAD~3', 'git pull --rebase=false && git rebase origin/main', 'git rebase --exec "--abort" main'],
+  amend: ['git commit --amend -m "better message"', 'git commit --amend --no-edit', 'git commit --am -m "x"', 'git commit -m "x" --amend',
+    // -c takes a value, so in -cm the m is that value and --amend after it is an option
+    'git commit -am x --amend', 'git commit -cm --amend'],
   'rm-force': ['git rm -f notes.txt'],
   'rewrite-history': ['git filter-branch --tree-filter "rm -f secrets.txt" HEAD', 'git filter-repo --path secrets.txt --invert-paths'],
   'reflog-expire': ['git reflog expire --expire=now --all'],
@@ -62,37 +55,60 @@ const BLOCKED = {
   'worktree-force': ['git worktree remove --force ../wt'],
   'repo-delete': ['gh repo delete desertcache/example --yes'],
   'delete-dot-git': ['rm -rf .git', 'rm -rf ./.git/', 'Remove-Item -Recurse -Force .git', 'rd /s /q .git'],
-  // Where the guard can't see what will run, it refuses instead of guessing.
-  'cannot-see': ['F=--force; git push $F', 'git push "$F"', 'git push ${F}', 'git push --{force,x}', 'git push "$(echo --force)"',
-    'git push $(printf -- --force)', 'git push `echo --force`', 'git push $(true) --force', 'git $SUB --force', 'git commit -m $MSG',
-    'echo "git push --force" | bash', 'bash < cmds.txt', 'bash -s', 'cmd < cmds.txt',
-    'powershell -EncodedCommand ZwBpAHQAIABwAHUAcwBoAA==', 'powershell -e ZwBpAHQA', 'pwsh -ec ZwBpAHQA', 'powershell -Command -',
+  // Anything that could carry or hide a command is refused, not parsed.
+  'cannot-read': [
+    // shells, interpreters and other programs that run a command given to them
+    'bash -c "git reset --hard"', 'bash -xc "git push --force"', 'sh -euc "git reset --hard"', 'bash -o pipefail -c "git reset --hard"',
+    'powershell -Command "git status; git reset --hard"', 'powershell -Comm "git push --force"', 'pwsh -Com "git push --force"',
+    'powershell -NoProfile "git push --force"', 'powershell -EncodedCommand ZwBpAHQA', 'powershell -e ZwBpAHQA', 'pwsh -ec ZwBpAHQA',
+    'powershell -Command -', 'cmd /c git reset --hard', 'cmd /C "git reset --hard"', 'cmd < cmds.txt',
+    'eval "git push --force"', 'iex "git reset --hard"', 'Invoke-Expression "git reset --hard"', 'Start-Process git -ArgumentList "push","--force"',
+    'node -e "require(\'child_process\').execSync(\'git push -f\')"', 'python -c "import os"', 'time git status',
+    'echo "git push --force" | bash', 'bash < cmds.txt', 'bash -s', 'bash <<< "git reset --hard"', 'source /dev/stdin <<< "git push -f"',
+    'bash /dev/stdin', 'export GIT_EDITOR="git reset --hard"',
+    // env and xargs in every form, including this round's four (xargs through wrappers, long options and their
+    // abbreviations, env -S inside a cluster, and env -S escapes)
+    'env -S "git push --force"', 'env -S"git push" --force', 'env -i -S "git -C . push -f"', 'env --split-string="git reset --hard"',
+    'env -iS "git push --force"', 'env -S "git\\ push --force"', 'env -i git reset --hard', 'env GIT_CONFIG_PARAMETERS="\'alias.x=push --force\'" git x',
+    'echo feature | xargs git branch -D', 'xargs -I {} git branch -D {}', 'echo "push --force" | xargs git', 'xargs -I{} git {}',
+    'xargs -a args.txt git', 'ls | xargs rm -rf', 'xargs -0 bash -c', 'xargs sudo git push', 'xargs timeout 5 git push',
+    'xargs --max-chars 100 git push', 'xargs --process-slot-var V git push', 'xargs --max-c 100 git', 'ls | xargs echo',
+    // wrappers the guard doesn't strip exactly, and anything but git, gh or rm after one
+    'sudo -u bob git clean -f', 'timeout -s KILL 5 git push', 'nice -10 git push', 'sudo npm test', 'timeout 60 npm test',
+    // a shell variable, command substitution, backtick, escape, brace or process substitution where it could hide a command
+    "git push $'--force'", "git push $'\\x2d\\x2dforce'", 'git push --for\\ce', 'F=--force; git push $F', 'git push "$F"', 'git push ${F}',
+    'git push --{force,x}', 'git push "$(echo --force)"', 'git push $(printf -- --force)', 'git push `echo --force`', 'git push $(true) --force',
+    'git $SUB --force', 'git commit -m $MSG', 'git push -m "$(echo --force)"', 'git status -C "$X"', 'git stash push -m "$X"',
+    'git -c "user.name=$N" status', 'git -C "$HOME/repo" reset --hard', '$cmd push --force', 'echo "$(git push --force)"', '{ git push --force; }',
+    'Get-ChildItem | ForEach-Object { git branch -D $_ }', 'diff <(git log) <(git log main)', 'FOO=1 git push -f',
     'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0="push --force" git x',
-    'env GIT_CONFIG_PARAMETERS="\'alias.x=push --force\'" git x',
-    // xargs builds the command from input the guard can't see
-    'echo "push --force" | xargs git', 'xargs -I{} git {}', 'xargs -a args.txt git', 'ls | xargs rm -rf', 'xargs -0 bash -c',
-    // a quoted expansion is a message only on commit, tag and merge, and a path only before the subcommand
-    'git push -m "$(echo --force)"', 'git push --file "$(echo --force)"', 'git status -C "$X"', 'git stash push -m "$X"',
-    'git -c "user.name=$N" status'],
+    "git commit -m \"$(cat <<'EOF'\nA message\nEOF\n)\"", 'cat <<EOF | git commit -F -\n$(git push --force)\nEOF',
+    // git's own ways of running another command, aliases, and settings that name a program
+    'git yolo', 'git nuke', 'git -c alias.p="push --force" p', 'git config alias.yolo "push --force"', 'git config --global alias.st status',
+    'git -c core.pager="git reset --hard" log', 'git config core.editor vim', 'git --exec-path=/tmp status',
+    'git submodule foreach "git reset --hard"', 'git bisect run make', 'git difftool -x "rm -rf ."',
+    // a short-option letter the guard doesn't know could take a value and change how the rest reads
+    'git commit -Zm "x"'],
 };
 
 const ALLOWED = [
-  'git status', 'git add -A', 'git add notes.txt', 'git commit -m "Fix the typo in the intro"', 'git diff', 'git log --oneline -5',
-  'git switch -c fix-typo', 'git checkout -b fix-typo', 'git checkout main', 'git checkout -b fix origin/main', 'git switch main',
-  'git push -u origin fix-typo', 'git push', 'git push --follow-tags', 'git push --dry-run', 'git pull', 'git fetch origin', 'git merge main',
-  'git restore --staged notes.txt', 'git restore --staged .', 'git reset --soft HEAD~1', 'git reset HEAD~1', 'git reset notes.txt',
+  'git status', 'git add -A', 'git add notes.txt', 'git commit -m "Fix the typo in the intro"', 'git commit -m "Fix the typo" -m "Why it matters"',
+  'git diff', 'git log --oneline -5', 'git switch -c fix-typo', 'git checkout -b fix-typo', 'git checkout main', 'git checkout -b fix origin/main',
+  'git switch main', 'git push -u origin fix-typo', 'git push', 'git push --follow-tags', 'git push --dry-run', 'git pull', 'git fetch origin',
+  'git merge main', 'git restore --staged notes.txt', 'git restore --staged .', 'git reset --soft HEAD~1', 'git reset HEAD~1', 'git reset notes.txt',
   'git branch -d fix-typo', 'git branch', 'git clean -n', 'git clean -fn', 'git clean -f --dry-run', 'git stash', 'git stash pop', 'git stash list',
-  'git rebase --abort', 'bash -c "git status"', 'pwsh -c "git log"', 'powershell -Command "git status"', 'cmd /c git status',
-  'git rm notes.txt', 'git gc', 'gh pr create --fill', 'gh pr view', 'rm notes.txt', 'npm test', 'bash scripts/build.sh',
-  'powershell -NoProfile -File build.ps1', 'git st', 'git co main', 'git config --global alias.st status',
+  'git rebase --abort', 'git rebase --abo', 'git rm notes.txt', 'git gc', 'gh pr create --fill', 'gh pr view', 'rm notes.txt', 'npm test',
+  'bash scripts/build.sh', 'powershell -NoProfile -File build.ps1', 'git co main', 'git lfs install', 'git -C ../repo status',
+  'git -c color.ui=always log', 'git config --global user.name "Sam Bates"', 'git config user.email', 'git config --get alias.st',
+  'command -v git',
+  // An option that takes a value takes the next word, as git does: here --amend is the message and --force a push option.
+  'git commit -m --amend', 'git push -o --force origin main',
+  // $ in another program's arguments can't change what git runs.
+  'echo "$HOME"', 'ls $HOME',
   // Mentioning a dangerous command is not running it.
   'git commit -m "Never run git reset --hard; use git stash"', "echo 'git push --force'", 'grep -rn "git clean -f" docs',
-  'git log --grep="rebase"', "git log --format='%h {a,b} $x'",
-  // A quoted expansion is fine where it can only be a message or a path: the usual commit heredoc, -C "$HOME/...".
-  "git commit -m \"$(cat <<'EOF'\nDocs: why we never git push --force\n\nIt rewrites shared history.\nEOF\n)\"",
-  "git commit -am \"$(cat <<'EOF'\nDon't break the build\nEOF\n)\"", 'git commit -m "costs $5"', 'git -C "$HOME/repo" status',
-  'git commit --message="$MSG"', "git tag -a v1 -m \"$(cat <<'EOF'\nRelease one\nEOF\n)\"", 'git merge -F "$MSGFILE" main',
-  'git --git-dir="$HOME/x/.git" status', 'ls | xargs echo', 'find . -name "*.tmp" | xargs wc -l', 'echo hi | xargs',
+  'git log --grep="rebase"', "git log --format='%h {a,b} $x'", "git log -- 'src/{a,b}'",
+  "git commit -F - <<'EOF'\nA message that mentions $(git push --force)\nEOF",
   "cat > NOTES.md <<'EOF'\ngit push --force\nrm -rf .git\nEOF\ngit add NOTES.md",
 ];
 
@@ -111,15 +127,9 @@ test('a heredoc body is text, and the command after it still counts', () => {
   assert.equal(check('cat > a.md <<-EOF\n\tgit reset --hard\n\tEOF\ngit status', ctx), null);
 });
 
-test('a command substitution runs, so what is inside it is checked too', () => {
-  assert.equal(check('echo "$(git reset --hard)"', ctx)?.rule, 'reset-hard');
-  assert.equal(check('git commit -m "$(git push --force)"', ctx)?.rule, 'force-push');
-});
-
 test('splits commands at separators but never inside quotes', () => {
   assert.deepEqual(splitCommands('git add -A && git commit -m "a; b && c" | cat'), [['git', 'add', '-A'], ['git', 'commit', '-m', 'a; b && c'], ['cat']]);
   assert.deepEqual(splitCommands("echo 'it''s'; git status"), [['echo', 'its'], ['git', 'status']]);
-  assert.deepEqual(splitCommands("git push $'--for\\x63e'"), [['git', 'push', '--force']]);
 });
 
 /** @param {object} input @param {Record<string, string>} [env] */
@@ -136,6 +146,11 @@ test('as a hook: a blocked command gets a deny decision with its reason', () => 
   assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
   assert.match(out.hookSpecificOutput.permissionDecisionReason, /git reset --hard.*git stash/);
   assert.match(out.systemMessage, /^training-wheels stopped `git reset --hard`/);
+});
+
+test('as a hook: a command it cannot read is refused with a way forward', () => {
+  const r = runHook({ tool_name: 'Bash', tool_input: { command: 'xargs git' } }, { TRAINING_WHEELS: '' });
+  assert.match(JSON.parse(r.out).systemMessage, /can't read safely what it would run.*run the command itself/);
 });
 
 test('as a hook: an allowed command, or the off switch, prints nothing', () => {

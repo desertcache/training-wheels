@@ -48,28 +48,33 @@ ways to do that:
 | `rm -rf .git` | Deletes the project's entire history | Ask for help with whatever you were undoing |
 | `gh repo delete` | Deletes the repository on GitHub | Archive it instead |
 
-It reads each command the way a shell would. It checks every part of `a && b; c | d` and what runs
-inside `$( ... )`; looks inside `bash -c "..."`, `powershell -Command "..."` (and its abbreviations),
-`cmd /c`, `eval`, `Invoke-Expression` and `env -S "..."`; sees past `sudo`, `env`, `timeout`, `nice`
-and a full path to git; matches git's abbreviated options (`--forc` is `--force` to git, so it is
-here too); looks up your git aliases; and ignores text that only mentions a command, like a commit
-message or a file written from a heredoc. It checks the Bash tool and the PowerShell tool.
+### How it reads a command
 
-Where it can't see what a command will run, it refuses instead of guessing: a shell variable or
-`$( ... )` in a git command (except as the message on `commit`, `tag` or `merge`, or the path git's
-own `-C`, `--git-dir` or `--work-tree` takes), git, a shell or `rm` run by `xargs` with arguments
-from its input, an encoded PowerShell command, commands piped into a shell, and git config passed in
-through the environment.
+It models plain git commands closely. It checks every part of `a && b; c | d`, walks each
+subcommand's options the way git does (an option that takes a value takes the next word, so a value is
+never mistaken for an option, and `--forc` counts as `--force` because git accepts abbreviations),
+sees through the few wrappers it can strip exactly (`sudo`, `command`, `exec`, `timeout N`, `nice`,
+`nohup`) and a full path to git, and ignores text that only mentions a command, like a commit message
+or a file written from a heredoc. It checks the Bash tool and the PowerShell tool.
+
+**Anything that could carry or hide a command is refused on purpose, not parsed:** `xargs`, `env`,
+`eval`, `Invoke-Expression`, `Start-Process`, a shell or PowerShell running a string or reading its
+input, an interpreter running inline code, `$( ... )`, backticks, braces, a shell variable or escape
+in a git command, variables set in front of git, git aliases, and git settings that name a program.
+The refusal says to run the command itself, written out in full. Each of those could be parsed, but
+every parser is one more place to be wrong; refusing what it can't read is the rule that doesn't
+need another patch. One effect you'll notice: commit messages go in with `-m` (one per paragraph),
+not a `$(cat <<EOF ...)` heredoc.
 
 ## What it isn't
 
 **It's for catching a beginner's mistakes, not for stopping an adversary.** It catches the honest
-mistakes an agent makes while trying to help, like "let me reset that for you". Anything that can run
-code can get around a check like this: an agent determined to could write a script that runs git
-(the hook doesn't read scripts, `npm run` targets or Makefiles), or use a program other than git to
-change files. The skill tells Claude not to look for a way around it. For real protection on a
-shared branch, turn on branch protection on GitHub; for an agent you don't trust, run it in a
-sandbox.
+mistakes an agent makes while trying to help, like "let me reset that for you", and refusing the
+wrappers is part of that design, not a gap. Anything that can run code can still get around a check
+like this: an agent determined to could write a script that runs git (the hook doesn't read scripts,
+`npm run` targets or Makefiles), or use a program other than git to change files. The skill tells
+Claude not to look for a way around it. For real protection on a shared branch, turn on branch
+protection on GitHub; for an agent you don't trust, run it in a sandbox.
 
 If the hook itself ever fails (bad input, a Node error), it lets the command through and Claude Code
 shows a one-line notice, rather than locking you out of git.
@@ -148,8 +153,8 @@ same sentence, and Claude takes the safer path.
 
 ## Tests
 
-`npm test` runs every command in the table above through the guard (with their abbreviations, quoting
-tricks, wrappers, aliases and nested shells), plus everyday commands that must
+`npm test` runs every command in the table above through the guard (with their abbreviations, quotes
+and the wrappers it strips), every form it refuses because it can't read it, and everyday commands that must
 pass (`git status`, `git push -u origin`, `git branch -d`, `git restore --staged`, `git reset --soft`,
 `git clean -n`, commit messages that mention dangerous commands, and heredocs), and runs the hook the
 way Claude Code does: JSON in, a decision out.
