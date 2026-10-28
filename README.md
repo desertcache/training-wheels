@@ -117,13 +117,13 @@ few that delete a whole project: `rm -rf .git` and `gh repo delete`.
   (subexpressions, arrays and splats build arguments the guard can't see), the call operator `&`,
   and dot-sourcing with `.`.
 
-Anywhere: setting or exporting a `GIT_` variable, `$( ... )`, backticks, braces, process substitution, a
-command named by an expression, variables set in front of git, git settings that name a program, and a
-list of programs that carry another command (`xargs`, `env`, `eval`, `time`, `watch`, `su`, `cmd`,
-`wsl`, `Invoke-Expression`, `Start-Process`, `Set-Variable`, `Set-Alias` and more, plus a shell or
-PowerShell given a string or reading its input, and an interpreter running inline code). In front of a
-command it reads past exactly `sudo`, `command`, `exec` and `nohup` with no options, `timeout N`, and
-`nice` or `nice -n N`.
+Anywhere: setting or exporting a `GIT_` variable (`=` or `+=`), `$( ... )`, backticks, braces, process
+substitution, a command named by an expression, variables set in front of git, git settings that name a
+program, and a list of programs that carry another command (`xargs`, `env`, `eval`, `time`, `watch`,
+`su`, `cmd`, `wsl`, `enable`, `Invoke-Expression`, `Start-Process`, `Set-Variable`, `Set-Alias` and
+more, plus a shell or PowerShell given a string or reading its input, and an interpreter running inline
+code). In front of a command it reads past exactly `sudo`, `command`, `exec`, `nohup` and `builtin`
+with no options, `timeout N`, and `nice` or `nice -n N`.
 
 The refusal says to run the command itself, on one line, written out in full (for the ASCII rule: in
 plain ASCII; for a redirection: without it). Two effects you'll notice: commit messages go in with `-m`
@@ -144,8 +144,10 @@ wrapper that isn't on its list (`setsid`, `flock` or `winpty` in front of git), 
 that builds the word git out of other letters, deleting files inside `.git` with `rm` or `find` (only
 `rm -rf .git` itself is refused, so a stale `.git/index.lock` can still be removed), a script that runs
 git (the hook doesn't read scripts, `npm run` targets or Makefiles), or a program other than git that
-changes files. The skill tells Claude not to look for a way around it. For real protection on a
-shared branch, turn on branch protection on GitHub; for an agent you don't trust, run it in a sandbox.
+changes files. An independent review tried 55 ways past the guard; the 6 that still get through are
+the wrappers, the PowerShell spelling and the two `.git` deletes named here. The skill tells Claude
+not to look for a way around it. For real protection on a shared branch, turn on branch protection on
+GitHub; for an agent you don't trust, run it in a sandbox.
 
 If the hook itself ever fails (bad input, a Node error), it lets the command through and Claude Code
 shows a one-line notice, rather than locking you out of git.

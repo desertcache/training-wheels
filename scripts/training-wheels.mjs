@@ -282,7 +282,7 @@ const RM = new Set(['rm', 'rmdir', 'rd', 'del', 'erase', 'remove-item', 'ri']);
 const REFUSED_PROGRAMS = new Set(['xargs', 'env', 'eval', 'iex', 'invoke-expression', 'invoke-command', 'icm', 'start-process', 'saps',
   'start', 'start-job', 'sajb', 'foreach-object', '%', 'parallel', 'watch', 'su', 'doas', 'runas', 'chroot', 'script', 'unbuffer',
   'stdbuf', 'ionice', 'chronic', 'time', 'busybox', 'cmd', 'wsl', 'trap', 'alias', 'set-variable', 'sv', 'new-variable', 'nv',
-  'set-alias', 'sal', 'new-alias', 'nal', 'set-item', 'si', 'new-item', 'ni']);
+  'set-alias', 'sal', 'new-alias', 'nal', 'set-item', 'si', 'new-item', 'ni', 'enable']);
 const SHELLS = new Set(['bash', 'sh', 'zsh', 'dash', 'ksh', 'fish', 'csh', 'tcsh']);
 const POWERSHELLS = new Set(['powershell', 'pwsh']);
 const INLINE_CODE = new Map([
@@ -290,6 +290,10 @@ const INLINE_CODE = new Map([
   ['ruby', /^-e$/], ['php', /^-r$/], ['deno', /^eval$/], ['bun', /^(-e|--eval)$/],
 ]);
 const RISKY_VARIABLE = /^(GIT_[A-Z_]*|EDITOR|VISUAL|PAGER|PATH|LESS|LESSOPEN|BASH_ENV|ENV)$/i;
+// An assignment word, NAME=value or NAME+=value (bash appends with +=); group 1 is the name.
+const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)\+?=/;
+/** The variable a word names or sets: "GIT_DIR+=x" and "GIT_DIR" are both GIT_DIR. @param {string} a */
+const variableOf = (a) => (ASSIGNMENT.exec(a)?.[1] ?? a);
 // A program name the guard reads as a name: letters, digits and path characters, nothing to evaluate.
 const PLAIN_PROGRAM = /^[A-Za-z0-9_.\/:\\-]+$/;
 
@@ -607,6 +611,8 @@ const ALLOWED = {
   },
   // Reading only: the log options (never --output), and no expire or delete.
   reflog: (rest) => {
+    const writes = rest.find((a) => ['expire', 'delete', 'exists', 'drop', 'list'].includes(a));
+    if (writes) return `reflog ${writes}`;
     if (rest.length && rest[0] !== 'show' && !rest[0].startsWith('-')) return `reflog ${rest[0]}`;
     return walk(rest[0] === 'show' ? rest.slice(1) : rest, READ_ONLY.log).off;
   },
@@ -669,7 +675,7 @@ function checkGit(argWords, ctx) {
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Strip the wrappers the guard reads exactly: sudo, command, exec and nohup with no options, timeout
+ * Strip the wrappers the guard reads exactly: sudo, command, exec, nohup and builtin with no options, timeout
  * with just a duration, nice with no options or -n N.
  * @param {Word[]} w
  * @returns {{ rest: Word[], wrapped: boolean } | { refused: Block }}
@@ -679,7 +685,7 @@ function stripWrappers(w) {
   for (;;) {
     const p = w.length ? program(w[0].text) : '';
     const next = w[1]?.text ?? '';
-    if (['sudo', 'exec', 'nohup'].includes(p)) {
+    if (['sudo', 'exec', 'nohup', 'builtin'].includes(p)) {
       if (next.startsWith('-')) return { refused: unreadable(`${p} ${next}`) };
       w = w.slice(1);
     } else if (p === 'command') {
@@ -707,8 +713,8 @@ function stripWrappers(w) {
 function checkCommand(command, ctx, gitLine) {
   let w = command;
   let assigned = false;
-  while (w.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(w[0].text)) {
-    const name = w[0].text.split('=')[0];
+  while (w.length && ASSIGNMENT.test(w[0].text)) {
+    const name = variableOf(w[0].text);
     if (/^GIT_/i.test(name) || (gitLine && RISKY_VARIABLE.test(name))) return gitVariable(name);
     w = w.slice(1);
     assigned = true;
@@ -738,7 +744,7 @@ function checkCommand(command, ctx, gitLine) {
   if (stripped.wrapped) return unreadable(`${prog} after a wrapper`);
   if (REFUSED_PROGRAMS.has(prog)) return unreadable(prog);
   if (['export', 'declare', 'typeset', 'readonly', 'local'].includes(prog)) {
-    return texts.some((a) => RISKY_VARIABLE.test(a.split('=')[0])) ? unreadable(`${prog} ${texts.join(' ')}`) : null;
+    return texts.some((a) => RISKY_VARIABLE.test(variableOf(a))) ? unreadable(`${prog} ${texts.join(' ')}`) : null;
   }
   if (prog === 'find' && texts.some((a) => /^-(exec|execdir|ok|okdir)$/.test(a))) return unreadable('find -exec');
   if (INLINE_CODE.has(prog) && texts.some((a) => INLINE_CODE.get(prog)?.test(a))) return unreadable(`${prog} running inline code`);

@@ -218,6 +218,26 @@ test('setting a GIT_ variable is refused in any line, and a program variable or 
   assert.equal(check('NAME=sam; echo $NAME', ctx), null);
 });
 
+test('a GIT_ variable set with += or exported bare is refused too', () => {
+  for (const c of ['export GIT_DIR+=x', 'export GIT_DIR', 'export -n GIT_CONFIG_COUNT', 'GIT_DIR+=/tmp/x; git status',
+    'GIT_CONFIG_COUNT+=1 git push', 'readonly GIT_WORK_TREE+=.']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+  }
+});
+
+test('builtin is read past like exec, and enable is refused', () => {
+  assert.equal(check('builtin git reset --hard', ctx)?.rule, 'reset-hard');
+  for (const c of ['builtin git status', 'builtin cd src', 'enable -f ./x.so git', 'enable -n cd']) {
+    assert.equal(check(c, ctx)?.rule, c.startsWith('builtin git') ? undefined : 'cannot-read', c);
+  }
+});
+
+test('git reflog with a subcommand anywhere in its arguments is off the list', () => {
+  for (const c of ['git reflog --oneline expire --all', 'git reflog -n 5 delete HEAD', 'git reflog show --all expire', 'git reflog --date=iso exists main']) {
+    assert.equal(check(c, ctx)?.rule, 'not-on-list', c);
+  }
+});
+
 test('splits commands at separators but never inside quotes', () => {
   assert.deepEqual(splitCommands('git add -A && git commit -m "a; b && c" | cat'), [['git', 'add', '-A'], ['git', 'commit', '-m', 'a; b && c'], ['cat']]);
   assert.deepEqual(splitCommands("echo 'it''s'; git status"), [['echo', 'its'], ['git', 'status']]);
