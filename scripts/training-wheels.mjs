@@ -740,8 +740,14 @@ export function check(line, context = {}) {
   const raw = rawRefusal(line);
   if (raw) return unreadable(raw);
   if (MENTIONS_GIT.test(line)) {
-    // Curly quotes are quotes to PowerShell but not to this reader, so the two could split a line differently.
-    if (/[“”‘’]/.test(line)) return unreadable('a curly quote in a git line');
+    // PowerShell reads a family of non-ASCII look-alikes as quotes and dashes (curly and low quotes, en and
+    // em dashes), so it and this reader could split or read the same line differently. Nothing a first pull
+    // request needs is outside ASCII; a commit message in other characters is the one cost.
+    if (/[^\x00-\x7f]/.test(line)) {
+      return block('cannot-read', 'a character outside plain ASCII in a git line',
+        "PowerShell reads some of these characters as quotes or dashes, so the guard can't be sure what would run",
+        'write the line in plain ASCII: straight quotes, plain hyphens, and a commit message without accented letters');
+    }
     if (ctx.shell === 'powershell') {
       // The backtick is PowerShell's escape character; nothing a first pull request needs uses it.
       if (line.includes('`')) return unreadable('a PowerShell backtick in a git line');

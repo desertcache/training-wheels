@@ -164,6 +164,17 @@ test('a git line with curly quotes is refused in both shells', () => {
   }
 });
 
+test('a git line with any character outside ASCII is refused in both shells', () => {
+  // Low and reversed quotes, en and em dashes, a no-break space, a zero-width space, and the one cost: a
+  // commit message with an accented letter. A line that doesn't mention git is left alone.
+  for (const c of ['git commit -m \u201afix it\u201b', 'git commit -m \u201efix it\u201d', 'git push origin main \u2013-force',
+    'git push origin main \u2014force', 'git push origin\u00a0--force', 'git status\u200b', 'git commit -m "caf\u00e9 hours"']) {
+    assert.equal(check(c, ctx)?.rule, 'cannot-read', c);
+    assert.equal(check(c, ps)?.rule, 'cannot-read', c);
+  }
+  assert.equal(check('echo "caf\u00e9 hours" > notes.txt', ctx), null);
+});
+
 test('splits commands at separators but never inside quotes', () => {
   assert.deepEqual(splitCommands('git add -A && git commit -m "a; b && c" | cat'), [['git', 'add', '-A'], ['git', 'commit', '-m', 'a; b && c'], ['cat']]);
   assert.deepEqual(splitCommands("echo 'it''s'; git status"), [['echo', 'its'], ['git', 'status']]);

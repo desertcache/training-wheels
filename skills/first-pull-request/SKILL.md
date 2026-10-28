@@ -32,7 +32,9 @@ change merged, leave them understanding what happened, and never put their work 
    what changed.
 4. **Commit.** `git add <the files>`, then `git commit -m "<one sentence: what changed and why>"`.
    For a longer message, add another `-m` per paragraph; don't build the message with `$( ... )` or a
-   heredoc, because the guard refuses commands it can't read. Undo: `git reset --soft HEAD~1` takes
+   heredoc, because the guard refuses commands it can't read. Keep the message in plain ASCII
+   (straight quotes, plain hyphens, no accented letters): the guard refuses a git line with any other
+   character. Undo: `git reset --soft HEAD~1` takes
    the commit back and keeps every change.
 5. **Push.** `git push -u origin <branch>` copies their branch to GitHub. It doesn't change main.
 6. **Open the pull request.** `gh pr create --fill` if the GitHub CLI is set up; otherwise give them
@@ -61,5 +63,5 @@ it: a force push, a hard reset, a branch delete and a rebase are stopped on purp
 one can lose work for good or rewrite history other people already have. Only the git commands a
 first pull request needs are on its list; for anything else, it says to ask a reviewer, so say that
 to the person too. Run git commands plainly, one per line, without wrappers like `xargs`, `env` or
-`bash -c`, without shell variables or wildcards, and without backslashes: the guard refuses what it
-can't read.
+`bash -c`, without shell variables or wildcards, without backslashes, and in plain ASCII: the guard
+refuses what it can't read.

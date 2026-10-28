@@ -104,16 +104,19 @@ few that delete a whole project: `rm -rf .git` and `gh repo delete`.
 
 **Anything it can't read exactly**, refused rather than parsed. In a line that mentions git: a
 backslash, a line break, a redirection that can carry a word (`>&`, `<&`, `&>`, `|&`; the plain `2>&1`
-is fine), an unquoted `*`, `?` or `[`, a shell variable, curly quotes (`“ ” ‘ ’`, which PowerShell
-reads as quotes), and, in PowerShell, a backtick anywhere (its escape character) or an unquoted `(`,
-`,` or `@` (subexpressions, arrays and splats build arguments the guard can't see). Anywhere: `$( ... )`,
+is fine), an unquoted `*`, `?` or `[`, a shell variable, any character outside plain ASCII (PowerShell
+reads look-alikes such as `“ ” „ ‘ ’ ‚ ‛` as quotes, and en and em dashes as hyphens), and, in
+PowerShell, a backtick anywhere (its escape character) or an unquoted `(`, `,` or `@` (subexpressions,
+arrays and splats build arguments the guard can't see). Anywhere: `$( ... )`,
 backticks, braces, process substitution, a command named by an expression, variables set in front of
 git, git settings that name a program, and the programs that carry another command (`xargs`, `env`,
 `eval`, `Invoke-Expression`, `Start-Process`, `Set-Variable`, `Set-Alias`, a shell or PowerShell given a
 string or reading its input, an interpreter running inline code, and any wrapper other than `sudo`,
 `command`, `exec`, `timeout N`, `nice` and `nohup`). The refusal says to run the command itself, on one
-line, written out in full. One effect you'll notice: commit messages go in with `-m` (one per
-paragraph), not a `$(cat <<EOF ...)` heredoc.
+line, written out in full (for the ASCII rule: in plain ASCII). One effect you'll notice: commit
+messages go in with `-m` (one per paragraph), not a `$(cat <<EOF ...)` heredoc. And the ASCII rule has
+one cost: a commit message (or a file name) with non-ASCII text, such as an accented name or a curly
+apostrophe, is refused too, so commit messages stay in plain ASCII.
 
 Every parser is one more place to be wrong, so the guard doesn't try to read these: a short list of
 what's allowed, and refusing what it can't read, are the two rules that don't need another patch.
